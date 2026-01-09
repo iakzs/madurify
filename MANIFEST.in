@@ -1,0 +1,4 @@
+include assets/*
+include models/*
+recursive-include assets *
+recursive-include models *

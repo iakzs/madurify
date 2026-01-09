@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Madurify</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <a href="https://github.com/iakzs/madurify" target="_blank" rel="noopener noreferrer" class="github-link" aria-label="GitHub repository">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 1S18.73.65 16 2.48a13.38 13.38 0 0 0-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 0 0 5 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 9 18.13V22"></path>
+                </svg>
+            </a>
+            <h1>Madurify</h1>
+            <p class="subtitle">Face swapping using geometric transformations</p>
+        </header>
+
+        <main>
+            <div class="upload-section" id="uploadSection">
+                <div class="upload-area" id="uploadArea">
+                    <svg class="upload-icon" width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                        <polyline points="17 8 12 3 7 8"></polyline>
+                        <line x1="12" y1="3" x2="12" y2="15"></line>
+                    </svg>
+                    <p class="upload-text">Drop an image here or click to browse</p>
+                    <p class="upload-hint">JPG or PNG only</p>
+                    <input type="file" id="fileInput" accept="image/jpeg,image/png" hidden>
+                </div>
+            </div>
+
+            <div class="preview-section hidden" id="previewSection">
+                <div class="preview-container">
+                    <div class="preview-item">
+                        <h3>Original</h3>
+                        <img id="originalPreview" alt="Original image">
+                    </div>
+                    <div class="preview-item">
+                        <h3>Result</h3>
+                        <div class="result-container">
+                            <img id="resultPreview" alt="Result image">
+                            <div class="loading-overlay hidden" id="loadingOverlay">
+                                <div class="spinner"></div>
+                                <p>Processing...</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="actions">
+                    <button class="btn btn-secondary" id="resetBtn">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <polyline points="1 4 1 10 7 10"></polyline>
+                            <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"></path>
+                        </svg>
+                        Reset
+                    </button>
+                    <button class="btn btn-primary" id="downloadBtn" disabled>
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                            <polyline points="7 10 12 15 17 10"></polyline>
+                            <line x1="12" y1="15" x2="12" y2="3"></line>
+                        </svg>
+                        Download
+                    </button>
+                </div>
+            </div>
+
+            <div class="error-message hidden" id="errorMessage"></div>
+        </main>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+</html>
+
