@@ -48,7 +48,7 @@ class FaceSwapper:
                 save_image(source_img, str(debug_dir / "debug_01_source_face.jpg"))
                 save_image(target_image, str(debug_dir / "debug_02_target_face.jpg"))
             
-            warped_face, mask = self._warp_face(
+            warped_face = self._warp_face(
                 source_img,
                 source_landmarks,
                 target_image,
@@ -58,6 +58,11 @@ class FaceSwapper:
             if self.debug and debug_path:
                 debug_dir = Path(debug_path).parent
                 save_image(warped_face, str(debug_dir / "debug_03_warped_before_color.jpg"))
+            
+            mask = self._create_mask(target_landmarks, target_image.shape[:2])
+            
+            if self.debug and debug_path:
+                debug_dir = Path(debug_path).parent
                 mask_vis = (mask.astype(np.float32) / 255.0 * 255).astype(np.uint8)
                 save_image(cv2.merge([mask_vis, mask_vis, mask_vis]), str(debug_dir / "debug_04_mask.jpg"))
             
@@ -213,101 +218,54 @@ class FaceSwapper:
             if existing.shape != warped_tri_crop.shape:
                 continue
             
-            valid_pixels = (warped_tri_crop.sum(axis=2) > 20)
-            valid_mask_3d = valid_pixels[:, :, np.newaxis].astype(np.float32)
-            combined_mask = tri_mask_3d_crop * valid_mask_3d
-            
             warped[dst_y:dst_y_end, dst_x:dst_x_end] = (
-                existing * (1 - combined_mask) + warped_tri_crop * combined_mask
+                existing * (1 - tri_mask_3d_crop) + warped_tri_crop * tri_mask_3d_crop
             ).astype(np.uint8)
         
-        face_outline_indices = list(range(17))
-        face_outline = target_points[face_outline_indices]
+        face_hull = cv2.convexHull(target_points.astype(np.int32))
+        face_mask_check = np.zeros((h, w), dtype=np.uint8)
+        cv2.fillConvexPoly(face_mask_check, face_hull, 255)
+        
+        face_region_content = warped[face_mask_check > 0]
+        if len(face_region_content) > 0 and np.sum(face_region_content) < 10000:
+            try:
+                left_eye = source_points[36]
+                right_eye = source_points[45]
+                nose_tip = source_points[30]
+                
+                left_eye_tgt = target_points[36]
+                right_eye_tgt = target_points[45]
+                nose_tip_tgt = target_points[30]
+                
+                src_tri = np.array([left_eye, right_eye, nose_tip], dtype=np.float32)
+                dst_tri = np.array([left_eye_tgt, right_eye_tgt, nose_tip_tgt], dtype=np.float32)
+                
+                M = cv2.getAffineTransform(src_tri, dst_tri)
+                warped_affine = cv2.warpAffine(source_img, M, (w, h), borderMode=cv2.BORDER_REPLICATE, flags=cv2.INTER_LANCZOS4)
+                warped[face_mask_check > 0] = warped_affine[face_mask_check > 0]
+            except:
+                pass
+        
+        return warped
+    
+    def _create_mask(self, target_landmarks, img_shape):
+        h, w = img_shape
+        target_points = target_landmarks.astype(np.float32)
+        
+        face_indices = list(range(17))
+        face_indices.extend(range(17, 68))
+        
+        face_region_points = target_points[face_indices]
+        full_face_hull = cv2.convexHull(face_region_points.astype(np.int32))
         
         mask = np.zeros((h, w), dtype=np.uint8)
-        cv2.fillConvexPoly(mask, face_outline.astype(np.int32), 255)
+        cv2.fillConvexPoly(mask, full_face_hull.astype(np.int32), 255)
         
-        left_eye_points = target_points[36:42].astype(np.int32)
-        right_eye_points = target_points[42:48].astype(np.int32)
-        nose_points = target_points[27:36].astype(np.int32)
-        mouth_points = target_points[48:68].astype(np.int32)
+        mask = cv2.dilate(mask, np.ones((5, 5), np.uint8), iterations=1)
         
-        cv2.fillConvexPoly(mask, left_eye_points, 255)
-        cv2.fillConvexPoly(mask, right_eye_points, 255)
-        cv2.fillConvexPoly(mask, nose_points, 255)
-        cv2.fillConvexPoly(mask, mouth_points, 255)
-        
-        eyebrow_left = target_points[17:22].astype(np.int32)
-        eyebrow_right = target_points[22:27].astype(np.int32)
-        cv2.fillConvexPoly(mask, eyebrow_left, 255)
-        cv2.fillConvexPoly(mask, eyebrow_right, 255)
-        
-        eye_skin_left = np.array([
-            target_points[17],
-            target_points[18],
-            target_points[36],
-            target_points[37],
-            target_points[38],
-            target_points[39],
-            target_points[40],
-            target_points[41],
-            target_points[31]
-        ], dtype=np.int32)
-        
-        eye_skin_right = np.array([
-            target_points[22],
-            target_points[23],
-            target_points[42],
-            target_points[43],
-            target_points[44],
-            target_points[45],
-            target_points[46],
-            target_points[47],
-            target_points[35]
-        ], dtype=np.int32)
-        
-        cv2.fillConvexPoly(mask, eye_skin_left, 255)
-        cv2.fillConvexPoly(mask, eye_skin_right, 255)
-        
-        forehead_points = np.array([
-            target_points[17],
-            target_points[18],
-            target_points[19],
-            target_points[24],
-            target_points[25],
-            target_points[26],
-            target_points[19]
-        ], dtype=np.int32)
-        cv2.fillConvexPoly(mask, forehead_points, 255)
-        
-        cheeks_left = np.array([
-            target_points[0],
-            target_points[1],
-            target_points[2],
-            target_points[3],
-            target_points[4],
-            target_points[5],
-            target_points[48],
-            target_points[31]
-        ], dtype=np.int32)
-        cheeks_right = np.array([
-            target_points[12],
-            target_points[13],
-            target_points[14],
-            target_points[15],
-            target_points[16],
-            target_points[54],
-            target_points[35]
-        ], dtype=np.int32)
-        cv2.fillConvexPoly(mask, cheeks_left, 255)
-        cv2.fillConvexPoly(mask, cheeks_right, 255)
-        
-        mask = cv2.dilate(mask, np.ones((5, 5), np.uint8), iterations=2)
         mask = cv2.GaussianBlur(mask, (15, 15), 0)
-        mask = cv2.dilate(mask, np.ones((3, 3), np.uint8), iterations=1)
-        mask = cv2.GaussianBlur(mask, (11, 11), 0)
         
-        return warped, mask
+        return mask
     
     def _correct_colors(self, target_img, warped_face, mask):
         mask_binary = (mask > 127).astype(np.uint8)
@@ -315,56 +273,59 @@ class FaceSwapper:
         if np.sum(mask_binary) < 50:
             return warped_face
         
-        target_lab = cv2.cvtColor(target_img, cv2.COLOR_RGB2LAB)
-        warped_lab = cv2.cvtColor(warped_face, cv2.COLOR_RGB2LAB)
+        target_lab = cv2.cvtColor(target_img, cv2.COLOR_RGB2LAB).astype(np.float32)
+        warped_lab = cv2.cvtColor(warped_face, cv2.COLOR_RGB2LAB).astype(np.float32)
         
-        for c in range(3):
-            target_channel = target_lab[:, :, c]
-            warped_channel = warped_lab[:, :, c]
+        mask_region = mask_binary > 0
+        
+        if np.sum(mask_region) > 100:
+            target_pixels_lab = target_lab[mask_region]
+            warped_pixels_lab = warped_lab[mask_region]
             
-            target_pixels = target_channel[mask_binary > 0]
-            warped_pixels = warped_channel[mask_binary > 0]
-            
-            if len(target_pixels) > 10 and len(warped_pixels) > 10:
-                target_mean = np.mean(target_pixels)
-                warped_mean = np.mean(warped_pixels)
-                target_std = np.std(target_pixels)
-                warped_std = np.std(warped_pixels)
+            if len(target_pixels_lab) > 10 and len(warped_pixels_lab) > 10:
+                target_mean = np.mean(target_pixels_lab, axis=0)
+                warped_mean = np.mean(warped_pixels_lab, axis=0)
+                target_std = np.std(target_pixels_lab, axis=0)
+                warped_std = np.std(warped_pixels_lab, axis=0)
                 
-                if warped_std > 0.1 and target_std > 0.1:
-                    if c == 0:
-                        gain_mean = np.clip(target_mean / warped_mean, 0.85, 1.15)
-                        gain_std = np.clip(target_std / warped_std, 0.85, 1.15)
-                    else:
-                        gain_mean = np.clip(target_mean / warped_mean, 0.8, 1.2)
-                        gain_std = np.clip(target_std / warped_std, 0.8, 1.2)
+                for c in range(3):
+                    target_channel = target_lab[:, :, c]
+                    warped_channel = warped_lab[:, :, c]
                     
-                    warped_channel = warped_channel.astype(np.float32)
-                    warped_channel = (warped_channel - warped_mean) * gain_std + target_mean
-                    warped_lab[:, :, c] = np.clip(warped_channel, 0, 255).astype(np.uint8)
+                    target_mean_c = target_mean[c]
+                    warped_mean_c = warped_mean[c]
+                    target_std_c = target_std[c]
+                    warped_std_c = warped_std[c]
+                    
+                    if warped_std_c > 0.1 and target_std_c > 0.1:
+                        if c == 0:
+                            gain_std = np.clip(target_std_c / (warped_std_c + 1e-6), 0.8, 1.2)
+                        else:
+                            gain_std = np.clip(target_std_c / (warped_std_c + 1e-6), 0.85, 1.15)
+                        
+                        warped_channel = (warped_channel - warped_mean_c) * gain_std + target_mean_c
+                        warped_lab[:, :, c] = np.clip(warped_channel, 0, 255)
         
-        warped_corrected = cv2.cvtColor(warped_lab, cv2.COLOR_LAB2RGB)
+        warped_corrected = cv2.cvtColor(warped_lab.astype(np.uint8), cv2.COLOR_LAB2RGB)
         
         target_rgb = target_img.astype(np.float32)
         warped_rgb = warped_corrected.astype(np.float32)
         
-        target_mean_rgb = np.mean(target_rgb[mask_binary > 0], axis=0)
-        warped_mean_rgb = np.mean(warped_rgb[mask_binary > 0], axis=0)
+        mask_float = mask_binary.astype(np.float32) / 255.0
+        mask_smooth = cv2.GaussianBlur(mask_float, (31, 31), 0)
+        mask_3d = cv2.merge([mask_smooth, mask_smooth, mask_smooth])
         
-        diff = target_mean_rgb - warped_mean_rgb
-        diff = np.clip(diff, -30, 30)
-        
-        mask_3d = mask_binary[:, :, np.newaxis].astype(np.float32) / 255.0
-        mask_blur = cv2.GaussianBlur(mask_3d, (21, 21), 0)
-        if len(mask_blur.shape) == 2:
-            mask_blur_3d = cv2.merge([mask_blur, mask_blur, mask_blur])
-        else:
-            mask_blur_3d = cv2.merge([mask_blur[:, :, 0], mask_blur[:, :, 0], mask_blur[:, :, 0]])
-        
-        diff_3d = diff.reshape(1, 1, 3)
-        warped_corrected = warped_corrected.astype(np.float32)
-        warped_corrected = warped_corrected + diff_3d * mask_blur_3d
-        warped_corrected = np.clip(warped_corrected, 0, 255).astype(np.uint8)
+        if np.sum(mask_binary) > 100:
+            target_mean_rgb = np.mean(target_rgb[mask_region], axis=0)
+            warped_mean_rgb = np.mean(warped_rgb[mask_region], axis=0)
+            
+            diff = target_mean_rgb - warped_mean_rgb
+            diff = np.clip(diff, -20, 20)
+            
+            diff_3d = diff.reshape(1, 1, 3)
+            warped_corrected = warped_corrected.astype(np.float32)
+            warped_corrected = warped_corrected + diff_3d * mask_3d
+            warped_corrected = np.clip(warped_corrected, 0, 255).astype(np.uint8)
         
         return warped_corrected
     
@@ -378,23 +339,13 @@ class FaceSwapper:
                 save_image(target_img, str(debug_dir / "debug_fallback_mask_too_small.jpg"))
             return target_img
         
-        warped_has_content = (warped_face.sum(axis=2) > 30)
-        content_mask = (mask_binary > 0) & warped_has_content
-        
-        if np.sum(content_mask) < 50:
-            if self.debug and debug_path:
-                debug_dir = Path(debug_path).parent
-                save_image(target_img, str(debug_dir / "debug_fallback_no_content.jpg"))
-            return target_img
-        
         if self.debug and debug_path:
             debug_dir = Path(debug_path).parent
             warped_face_masked = warped_face.copy()
             warped_face_masked[mask_binary == 0] = target_img[mask_binary == 0]
             save_image(warped_face_masked, str(debug_dir / "debug_warped_clean.jpg"))
         
-        mask_refined = cv2.GaussianBlur(mask_binary.astype(np.float32) * 255, (17, 17), 0)
-        mask_soft = mask_refined / 255.0
+        mask_soft = cv2.GaussianBlur(mask_binary.astype(np.float32) * 255, (45, 45), 0) / 255.0
         mask_3d = cv2.merge([mask_soft, mask_soft, mask_soft])
         
         result = (
