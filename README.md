@@ -1,6 +1,6 @@
 # Madurify
 
-A Python application with CLI and web interfaces that lets you swap faces in images using geometric transformations and algorithms - no AI required!
+A Python application with CLI and web interfaces that lets you swap faces in images without using AI!
 
 ## Features
 
@@ -27,7 +27,7 @@ Quick install & setup (if CMake is installed):
 pip install -r requirements.txt && pip install -e .
 ```
 
-![CLI Usage](md-assets/cli.png)
+![CLI Usage on v0.1.1](md-assets/cli.png)
 
 ## Usage
 
@@ -57,7 +57,7 @@ uvicorn src.web.app:app --reload
 
 Then open your browser to `http://localhost:8000`
 
-![Web Interface](md-assets/web.png)
+![Web Interface on v0.1.1](md-assets/web.png)
 
 ## Warning
 
