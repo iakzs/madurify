@@ -46,8 +46,7 @@ class FaceSwapper:
                 debug_dir = Path(debug_path).parent
                 save_image(source_img, str(debug_dir / "debug_01_source_face.jpg"))
                 save_image(target_image, str(debug_dir / "debug_02_target_face.jpg"))
-            
-            # Get transformation and warp face while preserving Maduro's proportions
+
             warped_face, transform_matrix, transformed_landmarks = self._warp_face(
                 source_img,
                 source_landmarks,
@@ -58,23 +57,20 @@ class FaceSwapper:
             if self.debug and debug_path:
                 debug_dir = Path(debug_path).parent
                 save_image(warped_face, str(debug_dir / "debug_03_warped_before_color.jpg"))
-            
-            # Create mask using transformed source landmarks (Maduro's face shape)
+
             mask = self._create_face_mask(transformed_landmarks, target_image.shape[:2])
             
             if self.debug and debug_path:
                 debug_dir = Path(debug_path).parent
                 mask_vis = mask.copy()
                 save_image(cv2.merge([mask_vis, mask_vis, mask_vis]), str(debug_dir / "debug_04_mask.jpg"))
-            
-            # Apply color correction to match target skin tone
+
             warped_face = self._correct_colors(target_image, warped_face, mask)
             
             if self.debug and debug_path:
                 debug_dir = Path(debug_path).parent
                 save_image(warped_face, str(debug_dir / "debug_05_warped_after_color.jpg"))
-            
-            # Blend using seamless cloning for best results
+
             result = self._blend_face_seamless(result, warped_face, mask, transformed_landmarks, debug_path)
             
             if self.debug and debug_path:
@@ -84,17 +80,14 @@ class FaceSwapper:
         return result
     
     def _select_best_source(self, target_landmarks):
-        """Select the best matching Maduro face based on pose similarity."""
         if len(self.maduro_faces) == 1:
             return 0
-        
-        # Calculate target face pose metrics
+
         target_left_eye = np.mean(target_landmarks[36:42], axis=0)
         target_right_eye = np.mean(target_landmarks[42:48], axis=0)
         target_nose = target_landmarks[30]
         target_chin = target_landmarks[8]
-        
-        # Face rotation (yaw approximation)
+
         target_eye_center = (target_left_eye + target_right_eye) / 2
         target_face_width = np.linalg.norm(target_right_eye - target_left_eye)
         target_nose_offset = (target_nose[0] - target_eye_center[0]) / target_face_width
