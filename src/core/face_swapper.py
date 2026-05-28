@@ -213,10 +213,97 @@ class FaceSwapper:
 
         ones = np.ones((source_points.shape[0], 1), dtype=np.float64)
         source_homogeneous = np.hstack([source_points, ones])
-        transformed_landmarks = (source_homogeneous @ M.T).astype(np.float32)
-        
-        return warped, M, transformed_landmarks
-    
+        rigid_landmarks = (source_homogeneous @ M.T).astype(np.float32)
+
+        warped = self._apply_expression_warp(
+            warped,
+            rigid_landmarks,
+            target_points.astype(np.float32),
+            (h, w),
+        )
+
+        return warped, M, target_points.astype(np.float32)
+
+    def _apply_expression_warp(self, img, src_landmarks, tgt_landmarks, img_size):
+        h, w = img_size
+
+        EXPRESSION_IDX = set(range(17, 27)) | set(range(36, 68))
+
+        dest_points = src_landmarks.copy()
+        for i in EXPRESSION_IDX:
+            dest_points[i] = tgt_landmarks[i]
+
+        def _bbox_anchors(pts, expand=0.15):
+            x0, y0 = pts[:, 0].min(), pts[:, 1].min()
+            x1, y1 = pts[:, 0].max(), pts[:, 1].max()
+            bw, bh = x1 - x0, y1 - y0
+            x0 -= bw * expand;  y0 -= bh * expand
+            x1 += bw * expand;  y1 += bh * expand
+            mx, my = (x0 + x1) / 2, (y0 + y1) / 2
+            return np.array([
+                [x0, y0], [mx, y0], [x1, y0],
+                [x0, my],           [x1, my],
+                [x0, y1], [mx, y1], [x1, y1],
+            ], dtype=np.float32)
+
+        face_anchors = _bbox_anchors(src_landmarks)   # same for src and dest
+        all_src  = np.vstack([src_landmarks,  face_anchors])
+        all_dest = np.vstack([dest_points,    face_anchors])
+
+        rect   = (0, 0, w, h)
+        subdiv = cv2.Subdiv2D(rect)
+
+        clamped_dest = []
+        for pt in all_dest:
+            cx = float(np.clip(pt[0], 0, w - 1))
+            cy = float(np.clip(pt[1], 0, h - 1))
+            clamped_dest.append((cx, cy))
+            subdiv.insert((cx, cy))
+
+        dest_map = {(round(cx), round(cy)): i
+                    for i, (cx, cy) in enumerate(clamped_dest)}
+
+        output = img.copy()
+
+        for tri in subdiv.getTriangleList():
+            pts_dest = np.array(
+                [(tri[0], tri[1]), (tri[2], tri[3]), (tri[4], tri[5])],
+                dtype=np.float32,
+            )
+
+            if any(p[0] < 0 or p[0] >= w or p[1] < 0 or p[1] >= h
+                   for p in pts_dest):
+                continue
+
+            indices = []
+            valid = True
+            for pt in pts_dest:
+                idx = dest_map.get((round(float(pt[0])), round(float(pt[1]))))
+                if idx is None:
+                    valid = False
+                    break
+                indices.append(idx)
+            if not valid:
+                continue
+
+            pts_src = np.array([all_src[i] for i in indices], dtype=np.float32)
+            pts_src[:, 0] = np.clip(pts_src[:, 0], 0, w - 1)
+            pts_src[:, 1] = np.clip(pts_src[:, 1], 0, h - 1)
+
+            M_tri = cv2.getAffineTransform(pts_src, pts_dest)
+
+            warped_patch = cv2.warpAffine(
+                img, M_tri, (w, h),
+                flags=cv2.INTER_LANCZOS4,
+                borderMode=cv2.BORDER_REFLECT_101,
+            )
+
+            tri_mask = np.zeros((h, w), dtype=np.uint8)
+            cv2.fillConvexPoly(tri_mask, pts_dest.astype(np.int32), 255)
+            output = np.where(tri_mask[:, :, np.newaxis] > 0, warped_patch, output)
+
+        return output
+
     def _create_face_mask(self, landmarks, img_shape):
         h, w = img_shape
         points = landmarks.astype(np.float32)
@@ -300,17 +387,18 @@ class FaceSwapper:
         for c in range(3):
             if warped_std[c] > 1e-6:
                 if c == 0:
-                    alpha = 0.7
+                    alpha = 0.35
                 else:
-                    alpha = 0.85
+                    alpha = 0.25
 
                 transfer_mean = target_mean[c] * alpha + warped_mean[c] * (1 - alpha)
                 transfer_std = target_std[c] * alpha + warped_std[c] * (1 - alpha)
 
                 channel = warped_lab[:, :, c]
                 normalized = (channel - warped_mean[c]) / (warped_std[c] + 1e-6)
-                transferred = normalized * transfer_std + transfer_mean
-                result_lab[:, :, c] = np.clip(transferred, 0, 255)
+                transferred = np.clip(normalized * transfer_std + transfer_mean, 0, 255)
+
+                result_lab[:, :, c] = np.where(mask_region, transferred, warped_lab[:, :, c])
         
         result = cv2.cvtColor(result_lab.astype(np.uint8), cv2.COLOR_LAB2RGB)
         
