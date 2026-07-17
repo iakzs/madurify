@@ -19,7 +19,9 @@ def load_image(image_path):
 
 def save_image(image_array, output_path):
     img = Image.fromarray(image_array.astype(np.uint8))
-    img.save(output_path, quality=95)
+    ext = Path(output_path).suffix.lower()
+    kwargs = {"quality": 95} if ext in (".jpg", ".jpeg") else {}
+    img.save(output_path, **kwargs)
 
 
 def validate_image_format(file_path):

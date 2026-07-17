@@ -5,7 +5,12 @@ A Python application with CLI and web interfaces that lets you swap faces in ima
 ## Features
 
 - Face detection using dlib
-- Face swapping directly from the python application
+- Accurate face region masking with full jaw contour coverage
+- Multi-source face template selection for best match
+- Color correction in LAB color space
+- Poisson and multi-band blending
+- Glasses and mouth interior restoration
+- Video and real-time webcam face swapping with temporal smoothing
 - Web interface with drag-and-drop upload
 
 ## Requirements
@@ -47,6 +52,25 @@ Options:
 - `-o, --output`: Output file path (default: `input_madurified.jpg`)
 - `-m, --maduro-face`: Path to face templates (can be more than one) (default: `assets/maduro_face*.jpg`)
 - `-p, --predictor`: Path to dlib predictor (default: `models/shape_predictor_68_face_landmarks.dat`)
+- `-d, --debug`: Save intermediate processing images
+- `--suffix`: Output filename suffix in batch mode (default: `_madurified`)
+- `--format`: Output format for batch mode (`jpg` or `png`)
+
+### Video
+
+Process a video file:
+```bash
+madurify input.mp4 -o output.mp4
+```
+
+### Webcam
+
+Real-time webcam face swap:
+```bash
+madurify --cam
+```
+
+Controls: `q`/`ESC` quit, `s` snapshot, `f` toggle mirror.
 
 ### Web Interface
 

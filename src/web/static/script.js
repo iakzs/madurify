@@ -4,12 +4,15 @@ const uploadSection = document.getElementById('uploadSection');
 const previewSection = document.getElementById('previewSection');
 const originalPreview = document.getElementById('originalPreview');
 const resultPreview = document.getElementById('resultPreview');
+const originalVideo = document.getElementById('originalVideo');
+const resultVideo = document.getElementById('resultVideo');
 const loadingOverlay = document.getElementById('loadingOverlay');
 const downloadBtn = document.getElementById('downloadBtn');
 const resetBtn = document.getElementById('resetBtn');
 const errorMessage = document.getElementById('errorMessage');
 
-let processedImageBlob = null;
+let processedBlob = null;
+let processedIsVideo = false;
 
 uploadArea.addEventListener('click', () => fileInput.click());
 
@@ -41,16 +44,19 @@ resetBtn.addEventListener('click', () => {
     uploadSection.classList.remove('hidden');
     previewSection.classList.add('hidden');
     fileInput.value = '';
-    processedImageBlob = null;
+    processedBlob = null;
+    processedIsVideo = false;
+    originalVideo.src = '';
+    resultVideo.src = '';
     hideError();
 });
 
 downloadBtn.addEventListener('click', () => {
-    if (processedImageBlob) {
-        const url = URL.createObjectURL(processedImageBlob);
+    if (processedBlob) {
+        const url = URL.createObjectURL(processedBlob);
         const a = document.createElement('a');
         a.href = url;
-        a.download = 'madurified.jpg';
+        a.download = processedIsVideo ? 'madurified.mp4' : 'madurified.jpg';
         document.body.appendChild(a);
         a.click();
         document.body.removeChild(a);
@@ -59,32 +65,45 @@ downloadBtn.addEventListener('click', () => {
 });
 
 function handleFile(file) {
-    if (!file.type.match(/^image\/(jpeg|png)$/)) {
-        showError('Please upload a JPG or PNG image');
+    const isImage = file.type.match(/^image\/(jpeg|png)$/);
+    const isVideo = file.type.match(/^video\//);
+
+    if (!isImage && !isVideo) {
+        showError('Please upload a JPG/PNG image or a video file');
         return;
     }
 
     hideError();
-    const reader = new FileReader();
-    reader.onload = (e) => {
-        originalPreview.src = e.target.result;
-        uploadSection.classList.add('hidden');
-        previewSection.classList.remove('hidden');
-        processImage(file);
-    };
-    reader.readAsDataURL(file);
+    processedIsVideo = isVideo;
+
+    originalPreview.classList.toggle('hidden', isVideo);
+    resultPreview.classList.toggle('hidden', isVideo);
+    originalVideo.classList.toggle('hidden', !isVideo);
+    resultVideo.classList.toggle('hidden', !isVideo);
+
+    const localUrl = URL.createObjectURL(file);
+    if (isVideo) {
+        originalVideo.src = localUrl;
+    } else {
+        originalPreview.src = localUrl;
+    }
+
+    uploadSection.classList.add('hidden');
+    previewSection.classList.remove('hidden');
+    processFile(file, isVideo);
 }
 
-async function processImage(file) {
+async function processFile(file, isVideo) {
     loadingOverlay.classList.remove('hidden');
     downloadBtn.disabled = true;
     resultPreview.src = '';
+    resultVideo.src = '';
 
     const formData = new FormData();
     formData.append('file', file);
 
     try {
-        const response = await fetch('/process', {
+        const response = await fetch(isVideo ? '/process-video' : '/process', {
             method: 'POST',
             body: formData
         });
@@ -94,13 +113,16 @@ async function processImage(file) {
             throw new Error(error.detail || 'Processing failed');
         }
 
-        processedImageBlob = await response.blob();
-        const imageUrl = URL.createObjectURL(processedImageBlob);
-        resultPreview.src = imageUrl;
+        processedBlob = await response.blob();
+        const url = URL.createObjectURL(processedBlob);
+        if (isVideo) {
+            resultVideo.src = url;
+        } else {
+            resultPreview.src = url;
+        }
         downloadBtn.disabled = false;
     } catch (error) {
-        showError(error.message || 'Failed to process image');
-        resultPreview.src = '';
+        showError(error.message || 'Failed to process file');
     } finally {
         loadingOverlay.classList.add('hidden');
     }
@@ -114,4 +136,3 @@ function showError(message) {
 function hideError() {
     errorMessage.classList.add('hidden');
 }
-

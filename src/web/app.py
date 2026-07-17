@@ -24,7 +24,6 @@ if static_dir.exists():
 
 @app.on_event("startup")
 async def startup_event():
-    from pathlib import Path
     assets_dir = Path(get_assets_path("maduro_face.jpg")).parent
     maduro_files = list(assets_dir.glob("maduro_face*.jpg")) + list(assets_dir.glob("maduro_face*.png"))
     predictor_path = get_models_path("shape_predictor_68_face_landmarks.dat")

@@ -26,9 +26,9 @@
                         <polyline points="17 8 12 3 7 8"></polyline>
                         <line x1="12" y1="3" x2="12" y2="15"></line>
                     </svg>
-                    <p class="upload-text">Drop an image here or click to browse</p>
-                    <p class="upload-hint">JPG or PNG only</p>
-                    <input type="file" id="fileInput" accept="image/jpeg,image/png" hidden>
+                    <p class="upload-text">Drop an image or video here or click to browse</p>
+                    <p class="upload-hint">JPG, PNG, MP4, MOV, MKV or WEBM</p>
+                    <input type="file" id="fileInput" accept="image/jpeg,image/png,video/mp4,video/quicktime,video/x-matroska,video/webm" hidden>
                 </div>
             </div>
 
@@ -37,11 +37,13 @@
                     <div class="preview-item">
                         <h3>Original</h3>
                         <img id="originalPreview" alt="Original image">
+                        <video id="originalVideo" controls class="hidden"></video>
                     </div>
                     <div class="preview-item">
                         <h3>Result</h3>
                         <div class="result-container">
                             <img id="resultPreview" alt="Result image">
+                            <video id="resultVideo" controls class="hidden"></video>
                             <div class="loading-overlay hidden" id="loadingOverlay">
                                 <div class="spinner"></div>
                                 <p>Processing...</p>

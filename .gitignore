@@ -40,4 +40,4 @@ htmlcov/
 .vscode/
 *.iml
 .venv
-test/debug*
+test/*

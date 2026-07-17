@@ -136,7 +136,8 @@ header h1 {
     margin-bottom: 1rem;
 }
 
-.preview-item img {
+.preview-item img,
+.preview-item video {
     width: 100%;
     height: auto;
     border-radius: 4px;
@@ -232,7 +233,7 @@ header h1 {
 }
 
 .hidden {
-    display: none;
+    display: none !important;
 }
 
 @media (max-width: 768px) {
