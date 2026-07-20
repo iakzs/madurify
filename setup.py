@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="madurify",
-    version="0.2.1",
+    version="0.2.2",
     description="Face swapping application using geometric transformations",
     author="iakzs",
     packages=find_packages(),
