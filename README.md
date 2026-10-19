@@ -8,10 +8,12 @@ A Python application with CLI and web interfaces that lets you swap faces in ima
 - Accurate face region masking with full jaw contour coverage
 - Multi-source face template selection for best match
 - Color correction in LAB color space
+- Adaptive local lighting transfer for mixed lighting and face shadows
 - Poisson and multi-band blending
 - Glasses and mouth interior restoration
 - Video and real-time webcam face swapping with temporal smoothing
 - Web interface with drag-and-drop upload
+- Web uploads support JPG, PNG and animated GIF images, plus common video formats
 
 ## Requirements
 
@@ -80,6 +82,8 @@ uvicorn src.web.app:app --reload
 ```
 
 Then open your browser to `http://localhost:8000`
+
+Web uploads are limited to 20 MB for images and 200 MB for videos. Animated GIFs are processed frame-by-frame and remain animated in the result.
 
 ![Web Interface on v0.1.1](md-assets/web.png)
 

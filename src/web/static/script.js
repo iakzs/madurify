@@ -13,6 +13,8 @@ const errorMessage = document.getElementById('errorMessage');
 
 let processedBlob = null;
 let processedIsVideo = false;
+let originalUrl = null;
+let processedUrl = null;
 
 uploadArea.addEventListener('click', () => fileInput.click());
 
@@ -44,6 +46,10 @@ resetBtn.addEventListener('click', () => {
     uploadSection.classList.remove('hidden');
     previewSection.classList.add('hidden');
     fileInput.value = '';
+    if (originalUrl) URL.revokeObjectURL(originalUrl);
+    if (processedUrl) URL.revokeObjectURL(processedUrl);
+    originalUrl = null;
+    processedUrl = null;
     processedBlob = null;
     processedIsVideo = false;
     originalVideo.src = '';
@@ -56,7 +62,7 @@ downloadBtn.addEventListener('click', () => {
         const url = URL.createObjectURL(processedBlob);
         const a = document.createElement('a');
         a.href = url;
-        a.download = processedIsVideo ? 'madurified.mp4' : 'madurified.jpg';
+        a.download = processedIsVideo ? 'madurified.mp4' : `madurified.${processedBlob.type === 'image/gif' ? 'gif' : processedBlob.type === 'image/png' ? 'png' : 'jpg'}`;
         document.body.appendChild(a);
         a.click();
         document.body.removeChild(a);
@@ -65,11 +71,12 @@ downloadBtn.addEventListener('click', () => {
 });
 
 function handleFile(file) {
-    const isImage = file.type.match(/^image\/(jpeg|png)$/);
-    const isVideo = file.type.match(/^video\//);
+    const extension = file.name.split('.').pop().toLowerCase();
+    const isImage = file.type.match(/^image\/(jpeg|png|gif)$/) || ['jpg', 'jpeg', 'png', 'gif'].includes(extension);
+    const isVideo = file.type.match(/^video\//) || ['mp4', 'avi', 'mov', 'mkv', 'webm', 'm4v'].includes(extension);
 
     if (!isImage && !isVideo) {
-        showError('Please upload a JPG/PNG image or a video file');
+        showError('Please upload a JPG, PNG or GIF image, or a supported video file.');
         return;
     }
 
@@ -81,11 +88,13 @@ function handleFile(file) {
     originalVideo.classList.toggle('hidden', !isVideo);
     resultVideo.classList.toggle('hidden', !isVideo);
 
-    const localUrl = URL.createObjectURL(file);
+    if (originalUrl) URL.revokeObjectURL(originalUrl);
+    if (processedUrl) URL.revokeObjectURL(processedUrl);
+    originalUrl = URL.createObjectURL(file);
     if (isVideo) {
-        originalVideo.src = localUrl;
+        originalVideo.src = originalUrl;
     } else {
-        originalPreview.src = localUrl;
+        originalPreview.src = originalUrl;
     }
 
     uploadSection.classList.add('hidden');
@@ -109,16 +118,22 @@ async function processFile(file, isVideo) {
         });
 
         if (!response.ok) {
-            const error = await response.json();
-            throw new Error(error.detail || 'Processing failed');
+            let message = 'Processing failed';
+            try {
+                const error = await response.json();
+                message = error.detail || message;
+            } catch (_) {
+                // The server may return a non-JSON error page.
+            }
+            throw new Error(message);
         }
 
         processedBlob = await response.blob();
-        const url = URL.createObjectURL(processedBlob);
+        processedUrl = URL.createObjectURL(processedBlob);
         if (isVideo) {
-            resultVideo.src = url;
+            resultVideo.src = processedUrl;
         } else {
-            resultPreview.src = url;
+            resultPreview.src = processedUrl;
         }
         downloadBtn.disabled = false;
     } catch (error) {
