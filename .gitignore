@@ -38,6 +38,7 @@ htmlcov/
 *~
 .idea/
 .vscode/
+.opencode/
 *.iml
 .venv
 test/*
