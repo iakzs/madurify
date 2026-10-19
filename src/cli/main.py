@@ -70,8 +70,8 @@ def main():
     parser.add_argument(
         "--detect-every",
         type=int,
-        default=3,
-        help="In video/cam mode, re-detect faces every N frames (default: 3)"
+        default=2,
+        help="In video/cam mode, re-detect faces every N frames (default: 2)"
     )
     parser.add_argument(
         "-m", "--maduro-face",

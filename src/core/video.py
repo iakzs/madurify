@@ -81,7 +81,7 @@ class LandmarkSmoother:
 
 class FrameSwapEngine:
 
-    def __init__(self, swapper, scale=0.6, detect_every=3, smooth_alpha=0.65):
+    def __init__(self, swapper, scale=0.6, detect_every=2, smooth_alpha=0.85):
         if not 0.1 <= scale <= 1.0:
             raise ValueError("scale must be in [0.1, 1.0]")
         self.swapper = swapper
@@ -140,8 +140,8 @@ def _mux_audio(silent_path, source_path, output_path):
         return False
 
 
-def process_video(swapper, input_path, output_path, scale=0.6, detect_every=3,
-                   smooth_alpha=0.65, keep_audio=True, progress_cb=None):
+def process_video(swapper, input_path, output_path, scale=0.6, detect_every=2,
+                   smooth_alpha=0.85, keep_audio=True, progress_cb=None):
     input_path = Path(input_path)
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -156,6 +156,9 @@ def process_video(swapper, input_path, output_path, scale=0.6, detect_every=3,
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    if width <= 0 or height <= 0:
+        cap.release()
+        raise ValueError("Video has invalid dimensions")
 
     engine = FrameSwapEngine(swapper, scale=scale, detect_every=detect_every,
                              smooth_alpha=smooth_alpha)
@@ -187,14 +190,18 @@ def process_video(swapper, input_path, output_path, scale=0.6, detect_every=3,
             frame_idx += 1
             if progress_cb:
                 progress_cb(frame_idx, total)
+        if frame_idx == 0:
+            raise ValueError("Video contains no readable frames")
     finally:
         cap.release()
         writer.release()
 
     if want_audio:
-        if _mux_audio(tmp_silent, input_path, output_path):
+        assert tmp_silent is not None
+        try:
+            if not _mux_audio(tmp_silent, input_path, output_path):
+                tmp_silent.replace(output_path)
+        finally:
             tmp_silent.unlink(missing_ok=True)
-        else:
-            tmp_silent.replace(output_path)
 
     return output_path

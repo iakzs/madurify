@@ -37,7 +37,7 @@ class _LatestFrameGrabber:
 
 
 def run_camera(swapper, cam_index=0, width=960, height=540, scale=0.6,
-               detect_every=3, smooth_alpha=0.65, mirror=True,
+               detect_every=2, smooth_alpha=0.85, mirror=True,
                snapshot_dir="."):
     cap = cv2.VideoCapture(cam_index, cv2.CAP_DSHOW)
     if not cap.isOpened():

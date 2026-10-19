@@ -83,7 +83,9 @@ class FaceSwapper:
                     save_image(cv2.merge([mask_vis, mask_vis, mask_vis]),
                                str(debug_dir / f"debug_{face_idx+1:02d}d_mask.jpg"))
 
-                warped_face = self._correct_colors(target_image, warped_face, mask)
+                warped_face = self._correct_colors(
+                    target_image, warped_face, mask, transformed_landmarks
+                )
                 warped_face = np.clip(warped_face, 0, 255).astype(np.uint8)
 
                 if self.debug and debug_path:
@@ -219,7 +221,8 @@ class FaceSwapper:
         all_dst = np.vstack([target_points, dst_anchors])
 
         tri = ScipyDelaunay(all_dst)
-        result = target_img.copy()
+        warped_sum = np.zeros((h, w, 3), dtype=np.float32)
+        weight_sum = np.zeros((h, w), dtype=np.float32)
 
         for simplex in tri.simplices:
             src_tri = all_src[simplex]
@@ -232,25 +235,34 @@ class FaceSwapper:
             if abs(src_area) < 1.0 or abs(dst_area) < 1.0:
                 continue
 
-            x, y, tw, th = cv2.boundingRect(dst_tri)
-            x = max(0, x); y = max(0, y)
-            tw = min(w - x, tw); th = min(h - y, th)
+            bx, by, bw, bh = cv2.boundingRect(dst_tri)
+            x, y = max(0, bx), max(0, by)
+            x1, y1 = min(w, bx + bw), min(h, by + bh)
+            tw, th = x1 - x, y1 - y
             if tw < 2 or th < 2:
                 continue
 
             dst_offset = dst_tri - np.float32([[x, y], [x, y], [x, y]])
             mask = np.zeros((th, tw), dtype=np.uint8)
-            cv2.fillConvexPoly(mask, np.round(dst_offset).astype(np.int32), 255)
+            cv2.fillConvexPoly(mask, np.round(dst_offset).astype(np.int32), 255,
+                               lineType=cv2.LINE_AA)
 
             tri_M = cv2.getAffineTransform(src_tri, dst_offset)
             patch = cv2.warpAffine(source_img, tri_M, (tw, th),
                                    flags=cv2.INTER_LINEAR,
                                    borderMode=cv2.BORDER_REPLICATE)
 
-            m3 = np.dstack([mask, mask, mask]).astype(np.float32) / 255.0
-            roi = result[y:y+th, x:x+tw].astype(np.float32)
-            blended = roi * (1.0 - m3) + patch.astype(np.float32) * m3
-            result[y:y+th, x:x+tw] = np.clip(blended, 0, 255).astype(np.uint8)
+            weight = mask.astype(np.float32) / 255.0
+            warped_sum[y:y+th, x:x+tw] += patch.astype(np.float32) * weight[:, :, None]
+            weight_sum[y:y+th, x:x+tw] += weight
+
+        coverage = np.clip(weight_sum, 0.0, 1.0)
+        valid = weight_sum > 1e-5
+        result = target_img.astype(np.float32).copy()
+        warped_sum[valid] /= weight_sum[valid, None]
+        result[valid] = (warped_sum[valid] * coverage[valid, None] +
+                         result[valid] * (1.0 - coverage[valid, None]))
+        result = np.clip(result, 0, 255).astype(np.uint8)
 
         return result, M, target_points
 
@@ -355,12 +367,45 @@ class FaceSwapper:
 
         return mask
 
-    def _correct_colors(self, target_img, warped_face, mask):
+    def _correct_colors(self, target_img, warped_face, mask, landmarks=None):
+        ys, xs = np.where(mask > 0)
+        if len(xs) == 0:
+            return warped_face
+        full_warped = warped_face
+        h, w = mask.shape
+        padding = 8
+        x0, x1 = max(0, int(xs.min()) - padding), min(w, int(xs.max()) + padding + 1)
+        y0, y1 = max(0, int(ys.min()) - padding), min(h, int(ys.max()) + padding + 1)
+        target_img = target_img[y0:y1, x0:x1]
+        warped_face = warped_face[y0:y1, x0:x1]
+        mask = mask[y0:y1, x0:x1]
         mask_float = mask.astype(np.float32) / 255.0
 
         base_interior = mask_float > 0.9
         if np.sum(base_interior) < 100:
-            return warped_face
+            return full_warped
+
+        if landmarks is not None:
+            local_landmarks = np.asarray(landmarks, dtype=np.float32).copy()
+            local_landmarks[:, 0] -= x0
+            local_landmarks[:, 1] -= y0
+            feature_mask = np.zeros(mask.shape, dtype=np.uint8)
+            eye_distance = np.linalg.norm(
+                np.mean(local_landmarks[42:48], axis=0) -
+                np.mean(local_landmarks[36:42], axis=0)
+            )
+            for eye_points in (local_landmarks[36:42], local_landmarks[42:48]):
+                cv2.fillConvexPoly(feature_mask, cv2.convexHull(eye_points.astype(np.int32)), 255)
+            mouth_points = local_landmarks[48:60].astype(np.int32)
+            cv2.fillConvexPoly(feature_mask, cv2.convexHull(mouth_points), 255)
+            feature_margin = max(3, int(eye_distance * 0.12) | 1)
+            feature_kernel = cv2.getStructuringElement(
+                cv2.MORPH_ELLIPSE, (feature_margin, feature_margin)
+            )
+            feature_mask = cv2.dilate(feature_mask, feature_kernel, iterations=1)
+            base_interior &= feature_mask == 0
+            if np.count_nonzero(base_interior) < 100:
+                return full_warped
 
         warped_gray = cv2.cvtColor(warped_face, cv2.COLOR_RGB2GRAY)
         skin_pixels_mask = warped_gray > 65
@@ -377,7 +422,7 @@ class FaceSwapper:
         warped_skin = warped_lab[interior]
 
         if len(target_skin) < 100 or len(warped_skin) < 100:
-            return warped_face
+            return full_warped
 
         result_lab = warped_lab.copy()
 
@@ -385,29 +430,61 @@ class FaceSwapper:
             w_ch = warped_skin[:, c]
             t_ch = target_skin[:, c]
 
-            w_mean, w_std = w_ch.mean(), w_ch.std()
-            t_mean, t_std = t_ch.mean(), t_ch.std()
+            w_center, t_center = np.median(w_ch), np.median(t_ch)
+            w_low, w_high = np.percentile(w_ch, (10, 90))
+            t_low, t_high = np.percentile(t_ch, (10, 90))
+            w_std = (w_high - w_low) / 2.563
+            t_std = (t_high - t_low) / 2.563
 
             if w_std > 1.0 and t_std > 1.0:
                 channel = warped_lab[:, :, c]
-                scale = np.clip(t_std / max(w_std, 0.1), 0.3, 3.0)
-                matched = (channel - w_mean) * scale + t_mean
+                scale = np.clip(t_std / max(w_std, 0.1), 0.65, 1.55)
+                matched = (channel - w_center) * scale + t_center
                 detail = channel - cv2.GaussianBlur(channel, (0, 0), 3)
                 matched_with_detail = matched + detail * 0.20
                 matched_with_detail = np.clip(matched_with_detail, 0, 255)
 
-                alpha = 0.92 if c == 0 else 0.82
+                alpha = 0.78 if c == 0 else 0.88
                 blended = (channel * (1.0 - mask_float * alpha) +
                            matched_with_detail * (mask_float * alpha))
                 result_lab[:, :, c] = np.clip(blended, 0, 255)
             else:
                 result_lab[:, :, c] = warped_lab[:, :, c]
 
+        # Transfer low-frequency lighting from the target while retaining the
+        # source face's high-frequency detail and texture. Center each field on
+        # the sampled skin so this complements (rather than repeats) global
+        # color matching above.
+        if landmarks is not None:
+            lighting_landmarks = np.asarray(landmarks, dtype=np.float32)
+            lighting_eye_distance = np.linalg.norm(
+                np.mean(lighting_landmarks[42:48], axis=0) -
+                np.mean(lighting_landmarks[36:42], axis=0)
+            )
+        else:
+            lighting_eye_distance = min(target_img.shape[:2]) * 0.3
+        sigma = max(3.0, float(lighting_eye_distance) * 0.18)
+        for channel_idx, max_delta, strength in ((0, 35.0, 0.8),
+                                                   (1, 10.0, 0.35),
+                                                   (2, 10.0, 0.35)):
+            target_low = cv2.GaussianBlur(
+                target_lab[:, :, channel_idx], (0, 0), sigma
+            )
+            source_low = cv2.GaussianBlur(
+                warped_lab[:, :, channel_idx], (0, 0), sigma
+            )
+            residual = target_low - source_low
+            residual -= np.median(residual[interior])
+            residual = np.clip(residual, -max_delta, max_delta)
+            result_lab[:, :, channel_idx] += residual * mask_float * strength
+
         result_lab = np.clip(result_lab, 0, 255).astype(np.uint8)
         result = cv2.cvtColor(result_lab, cv2.COLOR_LAB2RGB)
         result = np.clip(result, 0, 255).astype(np.uint8)
 
-        return result
+        output = full_warped.copy()
+        output[y0:y1, x0:x1] = result
+        return output
 
     def _blend_face(self, target_img, warped_face, mask, landmarks, original_img=None,
                     debug_path=None, face_idx=0, fast=False):
@@ -660,14 +737,27 @@ class FaceSwapper:
 
     def _multi_band_blend(self, target_img, warped_face, mask, levels=None):
         h, w = target_img.shape[:2]
-        max_levels = int(np.log2(min(h, w))) - 3
-        levels = levels if levels is not None else min(4, max_levels)
-        levels = max(2, levels)
-        levels = min(6, levels)
+        ys, xs = np.where(mask > 0)
+        if len(xs) == 0:
+            return target_img.copy()
 
-        mask_float = mask.astype(np.float32) / 255.0
-        target_f = target_img.astype(np.float32)
-        warped_f = warped_face.astype(np.float32)
+        requested_levels = 4 if levels is None else levels
+        padding = 2 ** min(requested_levels, 6) * 2
+        x0 = max(0, int(xs.min()) - padding)
+        x1 = min(w, int(xs.max()) + padding + 1)
+        y0 = max(0, int(ys.min()) - padding)
+        y1 = min(h, int(ys.max()) + padding + 1)
+
+        target_roi = target_img[y0:y1, x0:x1]
+        warped_roi = warped_face[y0:y1, x0:x1]
+        mask_roi = mask[y0:y1, x0:x1]
+        roi_h, roi_w = mask_roi.shape
+        max_levels = max(1, int(np.log2(min(roi_h, roi_w))) - 3)
+        levels = min(6, max(1, requested_levels), max_levels)
+
+        mask_float = mask_roi.astype(np.float32) / 255.0
+        target_f = target_roi.astype(np.float32)
+        warped_f = warped_roi.astype(np.float32)
 
         mask_pyr = [mask_float]
         for _ in range(levels):
@@ -709,4 +799,6 @@ class FaceSwapper:
             result = cv2.pyrUp(result, dstsize=(blended_pyr[level].shape[1], blended_pyr[level].shape[0]))
             result = result + blended_pyr[level]
 
-        return np.clip(result, 0, 255).astype(np.uint8)
+        output = target_img.copy()
+        output[y0:y1, x0:x1] = np.clip(result, 0, 255).astype(np.uint8)
+        return output
