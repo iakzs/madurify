@@ -111,7 +111,11 @@ class FrameSwapEngine:
 
     def process(self, frame_rgb):
         if self._frame_idx % self.detect_every == 0:
-            self.smoother.update(self._detect(frame_rgb))
+            try:
+                detections = self._detect(frame_rgb)
+            except Exception:
+                detections = []
+            self.smoother.update(detections)
         self._frame_idx += 1
 
         faces = self.smoother.current()
