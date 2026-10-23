@@ -112,10 +112,35 @@ async function processFile(file, isVideo) {
     formData.append('file', file);
 
     try {
-        const response = await fetch(isVideo ? '/process-video' : '/process', {
+        let response = await fetch(isVideo ? '/process-video' : '/process', {
             method: 'POST',
             body: formData
         });
+
+        if (isVideo && response.ok) {
+            const job = await response.json();
+            const loadingText = loadingOverlay.querySelector('p');
+            while (true) {
+                await new Promise(resolve => setTimeout(resolve, 1500));
+                const statusResponse = await fetch(job.status_url);
+                if (!statusResponse.ok) {
+                    throw new Error('Could not check video processing status');
+                }
+                const status = await statusResponse.json();
+                if (status.total > 0) {
+                    const percent = Math.floor(status.progress * 100 / status.total);
+                    loadingText.textContent = `Processing... ${percent}%`;
+                }
+                if (status.status === 'failed') {
+                    throw new Error(status.error || 'Video processing failed');
+                }
+                if (status.status === 'completed') {
+                    response = await fetch(`/process-video/${job.job_id}/download`);
+                    break;
+                }
+            }
+            loadingText.textContent = 'Processing...';
+        }
 
         if (!response.ok) {
             let message = 'Processing failed';
@@ -140,6 +165,8 @@ async function processFile(file, isVideo) {
         showError(error.message || 'Failed to process file');
     } finally {
         loadingOverlay.classList.add('hidden');
+        const loadingText = loadingOverlay.querySelector('p');
+        loadingText.textContent = 'Processing...';
     }
 }
 

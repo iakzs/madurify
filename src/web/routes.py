@@ -1,3 +1,7 @@
+from concurrent.futures import ThreadPoolExecutor
+import threading
+import uuid
+
 from fastapi import APIRouter, UploadFile, File, HTTPException
 from fastapi.responses import Response, FileResponse
 from starlette.background import BackgroundTask
@@ -18,6 +22,9 @@ UPLOAD_CHUNK_BYTES = 1024 * 1024
 
 _swapper = None
 _maduro_face_path = None
+_video_jobs = {}
+_video_jobs_lock = threading.Lock()
+_video_executor = ThreadPoolExecutor(max_workers=1)
 
 
 def initialize_swapper(maduro_face_paths, predictor_path=None):
@@ -153,35 +160,96 @@ async def process_video_endpoint(file: UploadFile = File(...)):
 
     input_path = Path(tmp_in.name)
     output_path = Path(tmp_out.name)
-
-    def _cleanup():
-        input_path.unlink(missing_ok=True)
-        output_path.unlink(missing_ok=True)
-
     try:
         try:
             await save_upload_limited(file, input_path, MAX_VIDEO_BYTES)
         finally:
             await file.close()
-        await run_in_threadpool(
-            process_video, _swapper, input_path, output_path, 0.6, 2, 0.85, True, None
-        )
     except HTTPException:
-        _cleanup()
+        input_path.unlink(missing_ok=True)
+        output_path.unlink(missing_ok=True)
         raise
-    except ValueError as e:
-        _cleanup()
-        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        _cleanup()
+        input_path.unlink(missing_ok=True)
+        output_path.unlink(missing_ok=True)
         raise HTTPException(status_code=500, detail=f"Processing error: {str(e)}")
-
     finally:
         await file.close()
+
+    job_id = uuid.uuid4().hex
+    with _video_jobs_lock:
+        _video_jobs[job_id] = {
+            "status": "queued", "progress": 0, "total": 0,
+            "error": None, "input_path": input_path, "output_path": output_path,
+        }
+
+    _video_executor.submit(_run_video_job, job_id, input_path, output_path, _swapper)
+    return {"job_id": job_id, "status_url": f"/process-video/{job_id}"}
+
+
+def _run_video_job(job_id, input_path, output_path, swapper):
+    def update_progress(done, total):
+        with _video_jobs_lock:
+            job = _video_jobs.get(job_id)
+            if job is not None:
+                job.update(status="processing", progress=done, total=total)
+
+    with _video_jobs_lock:
+        job = _video_jobs.get(job_id)
+        if job is not None:
+            job["status"] = "processing"
+
+    try:
+        process_video(swapper, input_path, output_path, 0.6, 2, 0.85,
+                      True, update_progress)
+        with _video_jobs_lock:
+            job = _video_jobs.get(job_id)
+            if job is not None:
+                job["status"] = "completed"
+    except Exception as e:
+        output_path.unlink(missing_ok=True)
+        with _video_jobs_lock:
+            job = _video_jobs.get(job_id)
+            if job is not None:
+                job.update(status="failed", error=str(e))
+    finally:
+        input_path.unlink(missing_ok=True)
+
+
+@router.get("/process-video/{job_id}")
+async def get_video_job(job_id: str):
+    with _video_jobs_lock:
+        job = _video_jobs.get(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="Video job not found")
+        return {
+            "status": job["status"],
+            "progress": job["progress"],
+            "total": job["total"],
+            "error": job["error"],
+        }
+
+
+@router.get("/process-video/{job_id}/download")
+async def download_video_job(job_id: str):
+    with _video_jobs_lock:
+        job = _video_jobs.get(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="Video job not found")
+        if job["status"] != "completed":
+            raise HTTPException(status_code=409, detail="Video processing is not complete")
+        output_path = job["output_path"]
+        input_path = job["input_path"]
+
+    def cleanup_job():
+        input_path.unlink(missing_ok=True)
+        output_path.unlink(missing_ok=True)
+        with _video_jobs_lock:
+            _video_jobs.pop(job_id, None)
 
     return FileResponse(
         output_path,
         media_type="video/mp4",
         filename="madurified.mp4",
-        background=BackgroundTask(_cleanup),
+        background=BackgroundTask(cleanup_job),
     )

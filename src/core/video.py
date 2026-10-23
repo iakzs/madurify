@@ -1,3 +1,5 @@
+from collections import deque
+from concurrent.futures import Future, ThreadPoolExecutor
 import shutil
 import subprocess
 import tempfile
@@ -109,7 +111,7 @@ class FrameSwapEngine:
             detections.append((rect, landmarks * inv))
         return detections
 
-    def process(self, frame_rgb):
+    def detect(self, frame_rgb):
         if self._frame_idx % self.detect_every == 0:
             try:
                 detections = self._detect(frame_rgb)
@@ -117,8 +119,9 @@ class FrameSwapEngine:
                 detections = []
             self.smoother.update(detections)
         self._frame_idx += 1
+        return self.smoother.current()
 
-        faces = self.smoother.current()
+    def process_faces(self, frame_rgb, faces):
         if not faces:
             return frame_rgb
 
@@ -126,6 +129,9 @@ class FrameSwapEngine:
             return self.swapper.swap_face(frame_rgb, fast=True, faces_override=faces)
         except Exception:
             return frame_rgb
+
+    def process(self, frame_rgb):
+        return self.process_faces(frame_rgb, self.detect(frame_rgb))
 
 
 def _mux_audio(silent_path, source_path, output_path):
@@ -145,7 +151,8 @@ def _mux_audio(silent_path, source_path, output_path):
 
 
 def process_video(swapper, input_path, output_path, scale=0.6, detect_every=2,
-                   smooth_alpha=0.85, keep_audio=True, progress_cb=None):
+                   smooth_alpha=0.85, keep_audio=True, progress_cb=None,
+                   workers=5):
     input_path = Path(input_path)
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -182,18 +189,38 @@ def process_video(swapper, input_path, output_path, scale=0.6, detect_every=2,
         cap.release()
         raise ValueError(f"Could not write video: {write_path}")
 
+    workers = max(1, int(workers))
+    pending = deque()
     frame_idx = 0
+
+    def write_next():
+        nonlocal frame_idx
+        future = pending.popleft()
+        result = future.result()
+        writer.write(cv2.cvtColor(result, cv2.COLOR_RGB2BGR))
+        frame_idx += 1
+        if progress_cb:
+            progress_cb(frame_idx, total)
+
     try:
-        while True:
-            ok, frame_bgr = cap.read()
-            if not ok:
-                break
-            frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-            result = engine.process(frame_rgb)
-            writer.write(cv2.cvtColor(result, cv2.COLOR_RGB2BGR))
-            frame_idx += 1
-            if progress_cb:
-                progress_cb(frame_idx, total)
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            while True:
+                ok, frame_bgr = cap.read()
+                if not ok:
+                    break
+                frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+                faces = engine.detect(frame_rgb)
+                if not faces:
+                    future = Future()
+                    future.set_result(frame_rgb)
+                else:
+                    future = executor.submit(engine.process_faces, frame_rgb, faces)
+                pending.append(future)
+                if len(pending) >= workers * 2:
+                    write_next()
+
+            while pending:
+                write_next()
         if frame_idx == 0:
             raise ValueError("Video contains no readable frames")
     finally:
