@@ -1,7 +1,54 @@
+import shutil
+import threading
+import urllib.request
+from pathlib import Path
+
 import numpy as np
 import cv2
 
 from src.core.paths import get_models_path
+
+_MODEL_LOCK = threading.Lock()
+_MODELS = {
+    "w600k_r50.onnx": (
+        "https://github.com/facefusion/facefusion-assets/releases/download/models-3.0.0/arcface_w600k_r50.onnx",
+        100_000_000,
+    ),
+    "inswapper_128.onnx": (
+        "https://github.com/facefusion/facefusion-assets/releases/download/models-3.0.0/inswapper_128.onnx",
+        400_000_000,
+    ),
+}
+
+
+def _ensure_model(filename):
+    path = Path(get_models_path(filename))
+    url, minimum = _MODELS[filename]
+    if path.is_file() and path.stat().st_size >= minimum:
+        return str(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    partial = path.with_name(filename + ".part")
+    print(f"Downloading {filename}...", flush=True)
+    request = urllib.request.Request(url, headers={"User-Agent": "madurify"})
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response, partial.open("wb") as output:
+            shutil.copyfileobj(response, output)
+    except Exception as exc:
+        partial.unlink(missing_ok=True)
+        raise RuntimeError(
+            f"Could not download {filename} into {path.parent}. "
+            "Copy the model there and try again."
+        ) from exc
+    if not partial.is_file() or partial.stat().st_size < minimum:
+        partial.unlink(missing_ok=True)
+        raise RuntimeError(f"Download of {filename} was incomplete.")
+    partial.replace(path)
+    return str(path)
+
+
+def _identity_model_paths():
+    with _MODEL_LOCK:
+        return {name: _ensure_model(name) for name in _MODELS}
 
 _ARCFACE = np.array(
     [
@@ -90,9 +137,10 @@ def image_to_template(keypoints, size=128):
 
 class IdentitySwap:
     def __init__(self, reference_bgr, reference_keypoints):
+        models = _identity_model_paths()
         emap_path = get_models_path("inswapper_emap.npy")
-        swap_path = get_models_path("inswapper_128.onnx")
-        recog_path = get_models_path("w600k_r50.onnx")
+        swap_path = models["inswapper_128.onnx"]
+        recog_path = models["w600k_r50.onnx"]
         self._emap = np.load(emap_path).astype(np.float32)
         self._recognizer = cv2.dnn.readNetFromONNX(recog_path)
         self._swapper = cv2.dnn.readNetFromONNX(swap_path)
