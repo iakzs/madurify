@@ -1,14 +1,53 @@
 import argparse
 import sys
 from pathlib import Path
+from PIL import Image
+from src.core.animation import process_animation
 from src.core.face_swapper import FaceSwapper
-from src.core.image_utils import load_image, save_image, validate_image_format
+from src.core.image_utils import (
+    is_animated, load_image, save_animation, save_image, validate_image_format,
+)
 from src.core.paths import get_assets_path, get_models_path
 from src.core.video import is_video_file, process_video
 
 
+def _animation_output(input_path, output_path):
+    source_ext = input_path.suffix.lower()
+    output_ext = output_path.suffix.lower()
+    if output_ext in {".gif", ".webp"}:
+        return output_path
+    kind_ext = ".webp" if source_ext == ".webp" else ".gif"
+    return output_path.with_suffix(kind_ext)
+
+
+def _is_animation_file(path):
+    if path.suffix.lower() not in {".gif", ".webp"}:
+        return False
+    with Image.open(path) as image:
+        return is_animated(image)
+
+
+def process_animation_file(swapper, input_path, output_path):
+    output_path = _animation_output(input_path, output_path)
+
+    def _progress(done, total):
+        if total > 0:
+            print(f"\r  {done}/{total} frames ({done * 100 // total}%)", end="", flush=True)
+
+    with Image.open(input_path) as image:
+        frames, durations, loop, kind = process_animation(
+            swapper, image, progress_cb=_progress
+        )
+    save_animation(frames, output_path, durations, loop=loop, kind=kind)
+    print(f"\n  Saved: {output_path.name}")
+    return True
+
+
 def process_single(swapper, input_path, output_path, debug=False):
     try:
+        if _is_animation_file(input_path):
+            return process_animation_file(swapper, input_path, output_path)
+
         if not validate_image_format(str(input_path)):
             print(f"  Skipping {input_path.name}: unsupported format")
             return False
@@ -70,8 +109,15 @@ def main():
     parser.add_argument(
         "--detect-every",
         type=int,
-        default=2,
-        help="In video/cam mode, re-detect faces every N frames (default: 2)"
+        default=1,
+        help="In video/cam mode, re-detect faces every N frames (default: 1)"
+    )
+    parser.add_argument(
+        "--max-edge",
+        type=int,
+        default=1280,
+        help="Longest side processed in video and webcam mode (default: 1280, 0 keeps full resolution). "
+             "The saved video stays at the original size."
     )
     parser.add_argument(
         "-m", "--maduro-face",
@@ -101,7 +147,7 @@ def main():
         "--format",
         type=str,
         default=None,
-        choices=["jpg", "png"],
+        choices=["jpg", "png", "webp"],
         help="Output format for batch mode (default: same as input)"
     )
 
@@ -118,7 +164,11 @@ def main():
 
     if args.maduro_face is None:
         assets_dir = Path(get_assets_path("maduro_face.jpg")).parent
-        maduro_files = list(assets_dir.glob("maduro_face*.jpg")) + list(assets_dir.glob("maduro_face*.png"))
+        maduro_files = (
+            list(assets_dir.glob("maduro_face*.jpg"))
+            + list(assets_dir.glob("maduro_face*.png"))
+            + list(assets_dir.glob("maduro_face*.webp"))
+        )
         if len(maduro_files) == 0:
             default_path = get_assets_path("maduro_face.jpg")
             print(f"Error: No Maduro face images found in {assets_dir}", file=sys.stderr)
@@ -151,7 +201,24 @@ def main():
             scale=args.scale if args.scale is not None else 0.6,
             detect_every=args.detect_every,
             snapshot_dir=str(input_path) if input_path else ".",
+            max_edge=args.max_edge,
         )
+        return
+
+    if input_path.is_file() and _is_animation_file(input_path):
+        if args.output is None:
+            ext = ".webp" if input_path.suffix.lower() == ".webp" else ".gif"
+            output = input_path.parent / f"{input_path.stem}{args.suffix}{ext}"
+        else:
+            output = Path(args.output)
+        print(f"Processing {input_path.name}...")
+        try:
+            success = process_animation_file(swapper, input_path, output)
+        except ValueError as e:
+            print(f"\nError: {e}", file=sys.stderr)
+            sys.exit(1)
+        if not success:
+            sys.exit(1)
         return
 
     if input_path.is_file() and is_video_file(input_path):
@@ -171,19 +238,24 @@ def main():
             else:
                 print(f"\r  {done} frames", end="", flush=True)
 
+        info = {}
         try:
             out = process_video(swapper, input_path, output, scale=scale,
                                 detect_every=args.detect_every,
-                                progress_cb=_progress)
+                                progress_cb=_progress, max_edge=args.max_edge,
+                                media_info=info)
         except ValueError as e:
             print(f"\nError: {e}", file=sys.stderr)
             sys.exit(1)
         print(f"\n  Saved: {out}")
+        if info.get("audio_note"):
+            print(f"  {info['audio_note']}")
         return
 
     if input_path.is_file():
         if not validate_image_format(str(input_path)):
-            print(f"Error: Unsupported format. Only JPG and PNG supported.", file=sys.stderr)
+            print("Error: Unsupported format. Only JPG, PNG, GIF and WebP are supported.",
+                  file=sys.stderr)
             sys.exit(1)
 
         if args.output is None:
@@ -197,12 +269,13 @@ def main():
             sys.exit(1)
 
     else:
-        valid_ext = {'.jpg', '.jpeg', '.png'}
+        valid_ext = {'.jpg', '.jpeg', '.png', '.gif', '.webp'}
         image_files = [f for f in sorted(input_path.iterdir())
                        if f.suffix.lower() in valid_ext and f.is_file()]
 
         if len(image_files) == 0:
-            print(f"Error: No JPG or PNG images found in {input_path}", file=sys.stderr)
+            print(f"Error: No JPG, PNG, GIF or WebP images found in {input_path}",
+                  file=sys.stderr)
             sys.exit(1)
 
         out_dir = Path(args.output) if args.output else input_path / "output"
@@ -214,7 +287,10 @@ def main():
         print(f"Processing {len(image_files)} images from {input_path}...")
         for img_file in image_files:
             suffix = args.suffix if args.suffix else ""
-            out_ext = f".{args.format}" if args.format else img_file.suffix
+            if _is_animation_file(img_file):
+                out_ext = ".webp" if img_file.suffix.lower() == ".webp" else ".gif"
+            else:
+                out_ext = f".{args.format}" if args.format else img_file.suffix
             out_name = f"{img_file.stem}{suffix}{out_ext}"
             out_path = out_dir / out_name
 

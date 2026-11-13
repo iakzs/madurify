@@ -42,3 +42,5 @@ htmlcov/
 *.iml
 .venv
 test/*
+models/inswapper_128.onnx
+models/w600k_r50.onnx

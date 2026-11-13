@@ -109,6 +109,25 @@ header h1 {
     color: var(--text-secondary);
 }
 
+.quality-picker {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    gap: 0.75rem;
+    margin-top: 1rem;
+    color: var(--text-secondary);
+    font-size: 0.875rem;
+}
+
+.quality-picker select {
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 0.4rem 0.6rem;
+    font: inherit;
+}
+
 .preview-section {
     margin-top: 2rem;
 }
@@ -220,6 +239,13 @@ header h1 {
 
 .btn-secondary {
     background: transparent;
+}
+
+.status-note {
+    color: var(--text-secondary);
+    text-align: center;
+    margin-top: 1rem;
+    font-size: 0.875rem;
 }
 
 .error-message {

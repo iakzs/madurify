@@ -10,6 +10,8 @@ const loadingOverlay = document.getElementById('loadingOverlay');
 const downloadBtn = document.getElementById('downloadBtn');
 const resetBtn = document.getElementById('resetBtn');
 const errorMessage = document.getElementById('errorMessage');
+const statusNote = document.getElementById('statusNote');
+const qualityPreset = document.getElementById('qualityPreset');
 
 let processedBlob = null;
 let processedIsVideo = false;
@@ -55,6 +57,7 @@ resetBtn.addEventListener('click', () => {
     originalVideo.src = '';
     resultVideo.src = '';
     hideError();
+    hideNote();
 });
 
 downloadBtn.addEventListener('click', () => {
@@ -62,7 +65,7 @@ downloadBtn.addEventListener('click', () => {
         const url = URL.createObjectURL(processedBlob);
         const a = document.createElement('a');
         a.href = url;
-        a.download = processedIsVideo ? 'madurified.mp4' : `madurified.${processedBlob.type === 'image/gif' ? 'gif' : processedBlob.type === 'image/png' ? 'png' : 'jpg'}`;
+        a.download = downloadName(processedBlob, processedIsVideo);
         document.body.appendChild(a);
         a.click();
         document.body.removeChild(a);
@@ -70,17 +73,38 @@ downloadBtn.addEventListener('click', () => {
     }
 });
 
+function fileExtension(file) {
+    return file.name.split('.').pop().toLowerCase();
+}
+
+function imageFormat(file) {
+    const extension = fileExtension(file);
+    if (extension === 'png') return 'png';
+    if (extension === 'webp') return 'webp';
+    if (extension === 'gif') return 'gif';
+    return 'jpeg';
+}
+
+function downloadName(blob, isVideo) {
+    if (isVideo || blob.type.startsWith('video/')) return 'madurified.mp4';
+    if (blob.type === 'image/gif') return 'madurified.gif';
+    if (blob.type === 'image/png') return 'madurified.png';
+    if (blob.type === 'image/webp') return 'madurified.webp';
+    return 'madurified.jpg';
+}
+
 function handleFile(file) {
-    const extension = file.name.split('.').pop().toLowerCase();
-    const isImage = file.type.match(/^image\/(jpeg|png|gif)$/) || ['jpg', 'jpeg', 'png', 'gif'].includes(extension);
+    const extension = fileExtension(file);
+    const isImage = file.type.match(/^image\/(jpeg|png|gif|webp)$/) || ['jpg', 'jpeg', 'png', 'gif', 'webp'].includes(extension);
     const isVideo = file.type.match(/^video\//) || ['mp4', 'avi', 'mov', 'mkv', 'webm', 'm4v'].includes(extension);
 
     if (!isImage && !isVideo) {
-        showError('Please upload a JPG, PNG or GIF image, or a supported video file.');
+        showError('Please upload a JPG, PNG, GIF or WebP image, or a supported video file.');
         return;
     }
 
     hideError();
+    hideNote();
     processedIsVideo = isVideo;
 
     originalPreview.classList.toggle('hidden', isVideo);
@@ -110,36 +134,27 @@ async function processFile(file, isVideo) {
 
     const formData = new FormData();
     formData.append('file', file);
+    formData.append('quality', qualityPreset.value);
+    const maybeAnimated = ['gif', 'webp'].includes(fileExtension(file));
+    const endpoint = isVideo
+        ? '/process-video'
+        : (maybeAnimated ? `/process-animation?fmt=${imageFormat(file)}` : `/process?fmt=${imageFormat(file)}`);
 
     try {
-        let response = await fetch(isVideo ? '/process-video' : '/process', {
+        let response = await fetch(endpoint, {
             method: 'POST',
             body: formData
         });
 
-        if (isVideo && response.ok) {
-            const job = await response.json();
-            const loadingText = loadingOverlay.querySelector('p');
-            while (true) {
-                await new Promise(resolve => setTimeout(resolve, 1500));
-                const statusResponse = await fetch(job.status_url);
-                if (!statusResponse.ok) {
-                    throw new Error('Could not check video processing status');
-                }
-                const status = await statusResponse.json();
-                if (status.total > 0) {
-                    const percent = Math.floor(status.progress * 100 / status.total);
-                    loadingText.textContent = `Processing... ${percent}%`;
-                }
-                if (status.status === 'failed') {
-                    throw new Error(status.error || 'Video processing failed');
-                }
-                if (status.status === 'completed') {
-                    response = await fetch(`/process-video/${job.job_id}/download`);
-                    break;
-                }
+        const contentType = response.headers.get('content-type') || '';
+        if (contentType.includes('application/json')) {
+            const payload = await response.json();
+            if (!response.ok) {
+                throw new Error(payload.detail || 'Processing failed');
             }
-            loadingText.textContent = 'Processing...';
+            if (payload.job_id) {
+                response = await waitForJob(payload);
+            }
         }
 
         if (!response.ok) {
@@ -170,6 +185,29 @@ async function processFile(file, isVideo) {
     }
 }
 
+async function waitForJob(job) {
+    const loadingText = loadingOverlay.querySelector('p');
+    while (true) {
+        await new Promise(resolve => setTimeout(resolve, 500));
+        const statusResponse = await fetch(job.status_url);
+        if (!statusResponse.ok) {
+            throw new Error('Could not check processing status');
+        }
+        const status = await statusResponse.json();
+        if (status.total > 0) {
+            const percent = Math.floor(status.progress * 100 / status.total);
+            loadingText.textContent = `Processing... ${percent}%`;
+        }
+        if (status.status === 'failed') {
+            throw new Error(status.error || 'Processing failed');
+        }
+        if (status.status === 'completed') {
+            if (status.audio_note) showNote(status.audio_note);
+            return fetch(job.download_url);
+        }
+    }
+}
+
 function showError(message) {
     errorMessage.textContent = message;
     errorMessage.classList.remove('hidden');
@@ -177,4 +215,14 @@ function showError(message) {
 
 function hideError() {
     errorMessage.classList.add('hidden');
+}
+
+function showNote(message) {
+    statusNote.textContent = message;
+    statusNote.classList.remove('hidden');
+}
+
+function hideNote() {
+    statusNote.textContent = '';
+    statusNote.classList.add('hidden');
 }

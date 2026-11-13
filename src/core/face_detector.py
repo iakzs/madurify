@@ -20,12 +20,26 @@ class FaceDetector:
             )
 
         self.predictor = dlib.shape_predictor(str(predictor_path))
+        yunet_path = Path(get_models_path("face_detection_yunet_2023mar.onnx"))
+        self._yunet_path = yunet_path if yunet_path.exists() else None
+        self._yunet = None
+        self._yunet_size = None
 
-    def detect_faces(self, image):
+    def detect_faces(self, image, fast=False):
         gray = self._to_grayscale(image)
         h, w = gray.shape
 
-        for upsample in [0, 1, 2]:
+        faces = self.detector(gray, 0)
+        if len(faces) > 0:
+            return faces
+
+        # The frontal detector misses faces that are small or looking down.
+        # YuNet still returns a box, and the landmark model fits that box.
+        yunet_faces = self._detect_yunet(image)
+        if len(yunet_faces) > 0 or fast:
+            return yunet_faces
+
+        for upsample in (1, 2):
             faces = self.detector(gray, upsample)
             if len(faces) > 0:
                 return faces
@@ -84,6 +98,91 @@ class FaceDetector:
                     ]
 
         return faces
+
+    def _yunet_rows(self, image):
+        if self._yunet_path is None or not hasattr(cv2, "FaceDetectorYN"):
+            return None
+        if image.ndim == 2:
+            bgr = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+        elif image.shape[2] == 4:
+            bgr = cv2.cvtColor(image, cv2.COLOR_RGBA2BGR)
+        else:
+            bgr = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+        height, width = bgr.shape[:2]
+        if width < 20 or height < 20:
+            return None
+        try:
+            if self._yunet is None:
+                self._yunet = cv2.FaceDetectorYN.create(
+                    str(self._yunet_path), "", (width, height), 0.6, 0.3, 5000,
+                )
+                self._yunet_size = (width, height)
+            elif self._yunet_size != (width, height):
+                self._yunet.setInputSize((width, height))
+                self._yunet_size = (width, height)
+            _, found = self._yunet.detect(bgr)
+        except cv2.error:
+            return None
+        return found
+
+    def landmarks_match(self, image, landmarks):
+        found = self._yunet_rows(image)
+        if found is None or len(found) == 0:
+            return False
+        lm = np.asarray(landmarks, dtype=np.float64)
+        if lm.shape[0] < 68:
+            return False
+        dlib_eyes = np.stack([lm[36:42].mean(axis=0), lm[42:48].mean(axis=0)])
+        iod = float(np.linalg.norm(dlib_eyes[0] - dlib_eyes[1]))
+        if iod < 8.0:
+            return False
+        nose = lm[30]
+        limit = iod * 0.32
+        for row in found:
+            if len(row) < 14:
+                continue
+            keypoints = row[4:14].reshape(5, 2)
+            right_eye, left_eye, yunet_nose = keypoints[0], keypoints[1], keypoints[2]
+            eye_error = min(
+                np.linalg.norm(dlib_eyes[0] - left_eye) + np.linalg.norm(dlib_eyes[1] - right_eye),
+                np.linalg.norm(dlib_eyes[0] - right_eye) + np.linalg.norm(dlib_eyes[1] - left_eye),
+            ) / 2.0
+            if eye_error < limit and np.linalg.norm(nose - yunet_nose) < limit:
+                return True
+        return False
+
+    def _detect_yunet(self, image):
+        found = self._yunet_rows(image)
+        if found is None:
+            return []
+        height, width = image.shape[:2]
+
+        rects = []
+        for row in found:
+            x, y, box_w, box_h = (float(v) for v in row[:4])
+            if box_w < 12 or box_h < 12 or len(row) < 14:
+                continue
+            right_eye, left_eye, _nose, right_mouth, left_mouth = row[4:14].reshape(5, 2)
+            eye_gap = float(np.linalg.norm(left_eye - right_eye))
+            if eye_gap < 8.0:
+                continue
+            # Eyes or mouth outside the picture means the face is cut off.
+            if min(right_eye[0], left_eye[0], right_mouth[0], left_mouth[0]) < 1:
+                continue
+            if max(right_eye[0], left_eye[0], right_mouth[0], left_mouth[0]) > width - 2:
+                continue
+            if min(right_eye[1], left_eye[1]) < 1:
+                continue
+            left = min(right_eye[0], left_eye[0], right_mouth[0], left_mouth[0]) - eye_gap * 0.55
+            right = max(right_eye[0], left_eye[0], right_mouth[0], left_mouth[0]) + eye_gap * 0.55
+            top = min(right_eye[1], left_eye[1]) - eye_gap * 0.95
+            bottom = max(right_mouth[1], left_mouth[1]) + eye_gap * 1.15
+            left = int(max(0, min(round(left), width - 2)))
+            top = int(max(0, min(round(top), height - 2)))
+            right = int(max(left + 1, min(round(right), width - 1)))
+            bottom = int(max(top + 1, min(round(bottom), height - 1)))
+            rects.append(dlib.rectangle(left, top, right, bottom))
+        return rects
 
     def get_landmarks(self, image, face):
         gray = self._to_grayscale(image)

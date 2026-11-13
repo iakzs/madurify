@@ -37,8 +37,8 @@ class _LatestFrameGrabber:
 
 
 def run_camera(swapper, cam_index=0, width=960, height=540, scale=0.6,
-               detect_every=2, smooth_alpha=0.85, mirror=True,
-               snapshot_dir="."):
+               detect_every=1, smooth_alpha=0.85, mirror=True,
+               snapshot_dir=".", max_edge=1280):
     cap = cv2.VideoCapture(cam_index, cv2.CAP_DSHOW)
     if not cap.isOpened():
         cap = cv2.VideoCapture(cam_index)
@@ -48,8 +48,10 @@ def run_camera(swapper, cam_index=0, width=960, height=540, scale=0.6,
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
 
+    camera_fps = cap.get(cv2.CAP_PROP_FPS)
     engine = FrameSwapEngine(swapper, scale=scale, detect_every=detect_every,
-                             smooth_alpha=smooth_alpha)
+                             smooth_alpha=smooth_alpha, max_edge=max_edge,
+                             fps=camera_fps if camera_fps and camera_fps > 1 else 30.0)
     grabber = _LatestFrameGrabber(cap)
     snapshot_dir = Path(snapshot_dir)
 

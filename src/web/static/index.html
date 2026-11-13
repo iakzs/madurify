@@ -27,9 +27,18 @@
                         <line x1="12" y1="3" x2="12" y2="15"></line>
                     </svg>
                     <p class="upload-text">Drop an image or video here or click to browse</p>
-                    <p class="upload-hint">JPG, PNG, GIF, MP4, MOV, MKV or WEBM</p>
-                    <input type="file" id="fileInput" accept="image/jpeg,image/png,image/gif,video/*,.mkv,.m4v" hidden>
+                    <p class="upload-hint">JPG, PNG, GIF, WebP, MP4, MOV, MKV, WEBM, AVI or M4V</p>
+                    <input type="file" id="fileInput" accept="image/jpeg,image/png,image/gif,image/webp,video/*,.mkv,.m4v,.avi" hidden>
                 </div>
+                <label class="quality-picker">
+                    <span>Speed</span>
+                    <select id="qualityPreset" aria-label="Processing speed for video and animated images">
+                        <option value="fast">Fast</option>
+                        <option value="balanced" selected>Balanced</option>
+                        <option value="quality">High</option>
+                    </select>
+                </label>
+                <p class="upload-hint">Video and animated images only. The template’s face is applied on every frame, including side views, and the eyes and mouth stay in motion. Fast uses a smaller picture; High keeps more detail. A frame with no face is left as it is.</p>
             </div>
 
             <div class="preview-section hidden" id="previewSection">
@@ -68,12 +77,13 @@
                         Download
                     </button>
                 </div>
+                <p class="status-note hidden" id="statusNote"></p>
             </div>
 
             <div class="error-message hidden" id="errorMessage"></div>
         </main>
     </div>
 
-    <script src="script.js?v=async-video-jobs-1"></script>
+    <script src="script.js?v=playback-speed-1"></script>
 </body>
 </html>

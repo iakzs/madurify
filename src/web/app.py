@@ -25,7 +25,11 @@ if static_dir.exists():
 @app.on_event("startup")
 async def startup_event():
     assets_dir = Path(get_assets_path("maduro_face.jpg")).parent
-    maduro_files = list(assets_dir.glob("maduro_face*.jpg")) + list(assets_dir.glob("maduro_face*.png"))
+    maduro_files = (
+        list(assets_dir.glob("maduro_face*.jpg"))
+        + list(assets_dir.glob("maduro_face*.png"))
+        + list(assets_dir.glob("maduro_face*.webp"))
+    )
     predictor_path = get_models_path("shape_predictor_68_face_landmarks.dat")
     
     if len(maduro_files) == 0:

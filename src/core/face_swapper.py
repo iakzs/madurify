@@ -5,6 +5,33 @@ from .face_detector import FaceDetector
 from .image_utils import load_image, save_image
 
 
+def _shape_anchors(pts):
+    x0, y0 = float(pts[:, 0].min()), float(pts[:, 1].min())
+    x1, y1 = float(pts[:, 0].max()), float(pts[:, 1].max())
+    bw, bh = max(x1 - x0, 1.0), max(y1 - y0, 1.0)
+    x0 -= bw * 0.2
+    y0 -= bh * 0.2
+    x1 += bw * 0.2
+    y1 += bh * 0.2
+    mx, my = (x0 + x1) / 2.0, (y0 + y1) / 2.0
+    return np.array([
+        [x0, y0], [mx, y0], [x1, y0],
+        [x0, my],           [x1, my],
+        [x0, y1], [mx, y1], [x1, y1],
+    ], dtype=np.float32)
+
+
+def _face_roi(points, width, height, margin=0.55):
+    x0, y0 = float(points[:, 0].min()), float(points[:, 1].min())
+    x1, y1 = float(points[:, 0].max()), float(points[:, 1].max())
+    bw, bh = max(x1 - x0, 1.0), max(y1 - y0, 1.0)
+    left = max(0, int(np.floor(x0 - bw * margin)))
+    top = max(0, int(np.floor(y0 - bh * margin)))
+    right = min(width, int(np.ceil(x1 + bw * margin)))
+    bottom = min(height, int(np.ceil(y1 + bh * margin)))
+    return left, top, right, bottom
+
+
 class FaceSwapper:
     RIGID_IDX = list(range(0, 17)) + list(range(27, 36)) + [39, 42]
     RIGID_MEAN_IDX = list(range(0, 17)) + list(range(27, 36))
@@ -42,8 +69,14 @@ class FaceSwapper:
                 raise ValueError("No face detected in target image")
             faces = sorted(faces, key=lambda f: (f.right() - f.left()) * (f.bottom() - f.top()), reverse=True)
 
+        if len(faces) == 0:
+            raise ValueError("No face detected in target image")
+
         result = target_image.copy()
         processed_regions = []
+        swapped_any = False
+        saw_face = False
+        last_error = None
 
         for face_idx, face_item in enumerate(faces):
             try:
@@ -63,8 +96,36 @@ class FaceSwapper:
                     save_image(source_img, str(debug_dir / f"debug_{face_idx+1:02d}a_source.jpg"))
                     save_image(target_image, str(debug_dir / f"debug_{face_idx+1:02d}b_target.jpg"))
 
-                warped_face, M, transformed_landmarks = self._warp_face(
-                    source_img, source_landmarks, target_image, target_landmarks
+                dest_lm = np.asarray(target_landmarks, dtype=np.float64)
+                shaped_ok = False
+                if dest_lm.shape[0] >= 68 and np.asarray(source_landmarks).shape[0] >= 68:
+                    strength = self._shape_strength(target_landmarks, target_image.shape)
+                    if strength <= 0 or not self.detector.landmarks_match(
+                        target_image, target_landmarks,
+                    ):
+                        saw_face = True
+                        continue
+                    try:
+                        shaped_ok = self._apply_identity(
+                            result, target_image, target_landmarks,
+                            source_img, source_landmarks, strength,
+                        )
+                    except Exception as shape_error:
+                        last_error = shape_error
+                        shaped_ok = False
+                    if not shaped_ok:
+                        saw_face = True
+                        continue
+
+                if shaped_ok:
+                    swapped_any = True
+                    if self.debug and debug_path:
+                        debug_dir = Path(debug_path).parent
+                        save_image(result, str(debug_dir / f"debug_{face_idx+1:02d}f_result.jpg"))
+                    continue
+
+                warped_face, _M, transformed_landmarks = self._warp_face(
+                    source_img, source_landmarks, target_image, target_landmarks, fast=fast
                 )
                 warped_face = np.clip(warped_face, 0, 255).astype(np.uint8)
 
@@ -73,9 +134,9 @@ class FaceSwapper:
                     save_image(warped_face, str(debug_dir / f"debug_{face_idx+1:02d}c_warped.jpg"))
 
                 face_center = np.mean(transformed_landmarks, axis=0)
-
-                mask = self._create_face_mask(transformed_landmarks, target_image.shape[:2],
-                                              None if fast else target_image)
+                mask = self._create_face_mask(
+                    transformed_landmarks, target_image.shape[:2], None if fast else target_image,
+                )
 
                 if self.debug and debug_path:
                     debug_dir = Path(debug_path).parent
@@ -101,15 +162,26 @@ class FaceSwapper:
                 result = self._blend_face(result, warped_face, mask, transformed_landmarks,
                                           target_image, debug_path, face_idx, fast=fast)
                 result = np.clip(result, 0, 255).astype(np.uint8)
+                swapped_any = True
 
                 if self.debug and debug_path:
                     debug_dir = Path(debug_path).parent
                     save_image(result, str(debug_dir / f"debug_{face_idx+1:02d}f_result.jpg"))
 
             except Exception as e:
+                last_error = e
                 if self.debug:
                     print(f"Warning: face {face_idx} failed: {e}")
                 continue
+
+        if not swapped_any:
+            if saw_face:
+                return result
+            if isinstance(last_error, ValueError):
+                raise last_error
+            if last_error is None:
+                raise ValueError("Could not swap detected face")
+            raise ValueError(f"Could not swap detected face: {last_error}") from last_error
 
         return result
 
@@ -152,13 +224,30 @@ class FaceSwapper:
             score = (abs(target_nose_offset - src_nose_offset) * 2.0 +
                      abs(target_nose_length - src_nose_length) * 1.0 +
                      abs(target_mouth_width - src_mouth_width) * 1.0 +
-                     abs(target_jaw_width - src_jaw_width) * 1.0)
+                     abs(target_jaw_width - src_jaw_width) * 1.0 +
+                     (4.0 if self._source_has_mic(idx) else 0.0))
 
             if score < best_score:
                 best_score = score
                 best_idx = idx
 
         return best_idx
+
+    def _source_has_mic(self, index):
+        image = self.maduro_faces[index]
+        landmarks = np.asarray(self.maduro_landmarks_list[index], dtype=np.float64)
+        height, width = image.shape[:2]
+        lip = landmarks[57]
+        chin = landmarks[8]
+        probe = lip + (chin - lip) * 0.45
+        cheek = landmarks[31]
+        px = int(np.clip(probe[0], 0, width - 1))
+        py = int(np.clip(probe[1], 0, height - 1))
+        cx = int(np.clip(cheek[0], 0, width - 1))
+        cy = int(np.clip(cheek[1], 0, height - 1))
+        probe_l = float(image[py, px].astype(np.int16).mean())
+        cheek_l = float(image[cy, cx].astype(np.int16).mean())
+        return probe_l < cheek_l * 0.62
 
     def _compute_eye_similarity(self, src_points, dst_points):
         src_left = np.mean(src_points[36:42], axis=0)
@@ -192,14 +281,453 @@ class FaceSwapper:
 
         return M
 
-    def _warp_face(self, source_img, source_landmarks, target_img, target_landmarks):
+    @staticmethod
+    def _shape_strength(landmarks, image_shape):
+        lm = np.asarray(landmarks, dtype=np.float64)
+        if lm.shape[0] < 68:
+            return 0.0
+        height, width = image_shape[:2]
+        left_eye = lm[36:42].mean(axis=0)
+        right_eye = lm[42:48].mean(axis=0)
+        iod = float(np.linalg.norm(right_eye - left_eye))
+        if iod < 12.0:
+            return 0.0
+        eye_vec = right_eye - left_eye
+        nose_t = float(np.dot(lm[30] - left_eye, eye_vec) / (np.dot(eye_vec, eye_vec) + 1e-6))
+        face_height = float(lm[8, 1] - lm[27, 1]) / iod
+        margin = min(
+            float(lm[:, 0].min()), float(lm[:, 1].min()),
+            width - 1 - float(lm[:, 0].max()), height - 1 - float(lm[:, 1].max()),
+        )
+        roll = abs(float(np.arctan2(eye_vec[1], eye_vec[0])))
+        anatomy = left_eye[1] < lm[30, 1] < lm[51, 1] < lm[8, 1]
+        # Points touching the frame edge belong to a cropped face. Warping
+        # them smears the border, so those faces are left alone.
+        if not anatomy or roll > np.radians(35) or margin < 12 or not 0.18 <= nose_t <= 0.90:
+            return 0.0
+        if face_height < 0.85 or face_height > 2.35:
+            return 0.0
+        full = (
+            0.34 <= nose_t <= 0.80
+            and 0.9 <= face_height <= 2.05
+            and margin >= 10
+            and roll <= np.radians(28)
+        )
+        return 1.0 if full else 0.45
+
+    def _compose_shape(self, target_landmarks, source_landmarks, strength=1.0):
+        target = np.asarray(target_landmarks, dtype=np.float64)
+        source = np.asarray(source_landmarks, dtype=np.float64)
+        if target.shape[0] < 68 or source.shape[0] < 68:
+            return target.copy()
+
+        left_eye = target[36:42].mean(axis=0)
+        right_eye = target[42:48].mean(axis=0)
+        iod = float(np.linalg.norm(right_eye - left_eye))
+        if iod < 8.0:
+            return target.copy()
+
+        aligned = self._transform_points(source, self._compute_eye_similarity(source, target))
+        amount = float(np.clip(strength, 0.0, 1.0))
+        cap = iod * 0.5
+        dest = target.copy()
+
+        jaw_w = np.array([
+            0.35, 0.7, 0.9, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+            1.0, 1.0, 1.0, 1.0, 1.0, 0.9, 0.7, 0.35,
+        ]) * amount
+        jaw_delta = aligned[0:17] - target[0:17]
+        jaw_delta[:, 0] = np.clip(jaw_delta[:, 0], -cap, cap)
+        jaw_delta[:, 1] = np.clip(jaw_delta[:, 1], -iod * 0.22, iod * 0.16)
+        dest[0:17] = target[0:17] + jaw_w[:, None] * jaw_delta
+
+        # Width is already close to the template, so the raw delta barely
+        # shows. Force the cheeks outward and keep the shorter chin.
+        center_x = float((left_eye[0] + right_eye[0]) * 0.5)
+        flare = np.array([
+            0.0, 0.06, 0.14, 0.22, 0.28, 0.22, 0.10, 0.0, 0.0,
+            0.0, 0.10, 0.22, 0.28, 0.22, 0.14, 0.06, 0.0,
+        ])
+        for index in range(17):
+            sign = -1.0 if target[index, 0] < center_x else 1.0
+            outward = iod * flare[index] * amount
+            moved = dest[index, 0] - target[index, 0]
+            if sign * moved < outward:
+                dest[index, 0] = target[index, 0] + sign * outward
+
+        nose_delta = np.clip(aligned[27:36] - target[27:36], -cap * 0.7, cap * 0.7)
+        dest[27:36] = target[27:36] + (0.85 * amount) * nose_delta
+        dest[31, 0] = min(dest[31, 0], target[31, 0] - iod * 0.1 * amount)
+        dest[35, 0] = max(dest[35, 0], target[35, 0] + iod * 0.1 * amount)
+
+        chin_move = dest[8] - target[8]
+        dest[48:68] = target[48:68] + chin_move * np.array([0.12, 0.55])
+        return dest
+
+    @staticmethod
+    def _face_plate(image, landmarks):
+        plate = np.array(image, copy=True)
+        hull = cv2.convexHull(np.round(np.asarray(landmarks, dtype=np.float64)).astype(np.int32))
+        mask = np.zeros(plate.shape[:2], dtype=np.uint8)
+        cv2.fillConvexPoly(mask, hull, 255)
+        grow = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (11, 11))
+        mask = cv2.dilate(mask, grow)
+        pixels = plate[mask > 0]
+        if len(pixels) == 0:
+            return plate
+        plate[mask == 0] = np.median(pixels, axis=0)
+        return plate
+
+    def _apply_identity(self, result, target_image, target_landmarks,
+                        source_img, source_landmarks, strength):
+        placed_on = self._tracked_features(target_image, target_landmarks)
+        if placed_on is None:
+            return False
+        dst_left, dst_right, dst_mouth = placed_on
+        src_left = np.asarray(source_landmarks[36:42], dtype=np.float64).mean(axis=0)
+        src_right = np.asarray(source_landmarks[42:48], dtype=np.float64).mean(axis=0)
+        if src_left[0] > src_right[0]:
+            src_left, src_right = src_right, src_left
+        matrix = self._eye_matrix(src_left, src_right, dst_left, dst_right)
+        plate = self._face_plate(source_img, source_landmarks)
+        height, width = target_image.shape[:2]
+        warped = cv2.warpAffine(
+            plate, matrix, (width, height),
+            flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE,
+        )
+        mask = self._feature_ellipse(dst_left, dst_right, dst_mouth, (height, width), strength)
+        if int(np.count_nonzero(mask)) < 40:
+            return False
+        matched = self._correct_colors(target_image, warped, mask, target_landmarks)
+        mixed = np.clip(
+            warped.astype(np.float32) * 0.7 + matched.astype(np.float32) * 0.3,
+            0, 255,
+        ).astype(np.uint8)
+        blended = self._multi_band_blend(result, mixed, mask, levels=4)
+        result[:] = np.clip(blended, 0, 255).astype(np.uint8)
+        return True
+
+    def _tracked_features(self, image, landmarks):
+        found = self.detector._yunet_rows(image)
+        if found is None or len(found) == 0:
+            return None
+        nose = np.asarray(landmarks[30], dtype=np.float64)
+        best = None
+        best_dist = 1e9
+        for row in found:
+            if len(row) < 14:
+                continue
+            points = row[4:14].reshape(5, 2).astype(np.float64)
+            dist = float(np.linalg.norm(points[2] - nose))
+            if dist < best_dist:
+                best_dist = dist
+                best = points
+        if best is None:
+            return None
+        eyes = best[:2]
+        iod = float(np.linalg.norm(eyes[0] - eyes[1]))
+        if iod < 8 or best_dist > iod * 0.8:
+            return None
+        image_left = eyes[np.argmin(eyes[:, 0])]
+        image_right = eyes[np.argmax(eyes[:, 0])]
+        mouth = best[3:5].mean(axis=0)
+        eye_center = (image_left + image_right) / 2.0
+        reach = float(np.linalg.norm(mouth - eye_center)) / iod
+        # A face looking hard down or up compresses this and the paste misses the head.
+        if not 0.95 <= reach <= 1.45:
+            return None
+        return image_left, image_right, mouth
+
+    @staticmethod
+    def _eye_matrix(src_left, src_right, dst_left, dst_right):
+        src_center = (src_left + src_right) / 2.0
+        dst_center = (dst_left + dst_right) / 2.0
+        src_dist = float(np.linalg.norm(src_right - src_left))
+        dst_dist = float(np.linalg.norm(dst_right - dst_left))
+        scale = dst_dist / max(src_dist, 1.0)
+        rotation = (
+            np.arctan2(dst_right[1] - dst_left[1], dst_right[0] - dst_left[0])
+            - np.arctan2(src_right[1] - src_left[1], src_right[0] - src_left[0])
+        )
+        cos_r, sin_r = np.cos(rotation), np.sin(rotation)
+        matrix = np.zeros((2, 3), dtype=np.float64)
+        matrix[0, 0] = scale * cos_r
+        matrix[0, 1] = -scale * sin_r
+        matrix[1, 0] = scale * sin_r
+        matrix[1, 1] = scale * cos_r
+        matrix[0, 2] = dst_center[0] - scale * (cos_r * src_center[0] - sin_r * src_center[1])
+        matrix[1, 2] = dst_center[1] - scale * (sin_r * src_center[0] + cos_r * src_center[1])
+        return matrix
+
+    @staticmethod
+    def _feature_ellipse(left_eye, right_eye, mouth, image_shape, strength):
+        height, width = image_shape[:2]
+        eye_center = (left_eye + right_eye) / 2.0
+        iod = float(np.linalg.norm(right_eye - left_eye))
+        down = mouth - eye_center
+        reach = float(np.linalg.norm(down))
+        if reach < iod * 0.3:
+            down = np.array([0.0, iod])
+            reach = iod
+        center = eye_center + down * 0.55
+        angle = float(np.degrees(np.arctan2(down[1], down[0])) - 90.0)
+        axes = (max(int(iod * 1.05), 4), max(int(reach * 1.1), 4))
+        mask = np.zeros((height, width), dtype=np.uint8)
+        cv2.ellipse(
+            mask,
+            (int(round(center[0])), int(round(center[1]))),
+            axes, angle, 0, 360, 255, -1,
+        )
+        soft = cv2.GaussianBlur(mask, (0, 0), 0.6)
+        core_size = max(3, int(iod * 0.2) | 1)
+        core = cv2.erode(
+            mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (core_size, core_size)),
+        )
+        soft[core > 0] = 255
+        return soft
+
+    @staticmethod
+    def _transform_points(points, matrix):
+        pts = np.asarray(points, dtype=np.float64)
+        out = np.empty_like(pts)
+        out[:, 0] = matrix[0, 0] * pts[:, 0] + matrix[0, 1] * pts[:, 1] + matrix[0, 2]
+        out[:, 1] = matrix[1, 0] * pts[:, 0] + matrix[1, 1] * pts[:, 1] + matrix[1, 2]
+        return out
+
+    @staticmethod
+    def _forehead_points(landmarks):
+        lm = np.asarray(landmarks, dtype=np.float64)
+        left_eye = lm[36:42].mean(axis=0)
+        right_eye = lm[42:48].mean(axis=0)
+        eye_vec = right_eye - left_eye
+        iod = float(np.linalg.norm(eye_vec)) + 1e-6
+        up = np.array([-eye_vec[1], eye_vec[0]], dtype=np.float64)
+        up /= float(np.linalg.norm(up)) + 1e-6
+        if up[1] > 0:
+            up = -up
+        brow = lm[17:27].mean(axis=0)
+        left = lm[17]
+        right = lm[26]
+        span = right - left
+        return np.stack([
+            brow + up * iod * 0.42,
+            left + up * iod * 0.5 - span * 0.12,
+            right + up * iod * 0.5 + span * 0.12,
+            brow + up * iod * 0.95,
+        ])
+
+    @staticmethod
+    def _outer_ring(landmarks, scale=1.12, count=18):
+        lm = np.asarray(landmarks, dtype=np.float64)
+        center = lm.mean(axis=0)
+        rx = max(float(lm[:, 0].max() - lm[:, 0].min()) * 0.5 * scale, 4.0)
+        ry = max(float(lm[:, 1].max() - lm[:, 1].min()) * 0.5 * scale, 4.0)
+        angles = np.linspace(0.0, 2.0 * np.pi, count, endpoint=False)
+        return np.stack([
+            center[0] + np.cos(angles) * rx,
+            center[1] + np.sin(angles) * ry,
+        ], axis=1)
+
+    def _control_points(self, src_landmarks, dst_landmarks, lock_ring):
+        src = np.asarray(src_landmarks, dtype=np.float64)
+        dst = np.asarray(dst_landmarks, dtype=np.float64)
+        src_extra = self._forehead_points(src)
+        dst_extra = self._forehead_points(dst)
+        if lock_ring:
+            ring = self._outer_ring(src)
+            src_ring = ring
+            dst_ring = ring
+        else:
+            src_ring = self._outer_ring(src)
+            dst_ring = self._outer_ring(dst)
+        return (
+            np.vstack([src, src_extra, src_ring]).astype(np.float32),
+            np.vstack([dst, dst_extra, dst_ring]).astype(np.float32),
+        )
+
+    def _remap_mesh(self, sample, src_landmarks, dst_landmarks, canvas=None, lock_ring=False):
         from scipy.spatial import Delaunay as ScipyDelaunay
+
+        sample = np.asarray(sample)
+        if sample.ndim != 3 or sample.shape[2] != 3:
+            return None
+        if canvas is None:
+            canvas = sample
+        if canvas.shape[2] != 3:
+            return None
+
+        src_pts, dst_pts = self._control_points(src_landmarks, dst_landmarks, lock_ring)
+        out_h, out_w = canvas.shape[:2]
+        margin = 2.0
+        dst_pts[:, 0] = np.clip(dst_pts[:, 0], margin, out_w - 1 - margin)
+        dst_pts[:, 1] = np.clip(dst_pts[:, 1], margin, out_h - 1 - margin)
+        if lock_ring:
+            src_pts[-18:] = dst_pts[-18:]
+
+        left, top, right, bottom = _face_roi(dst_pts, out_w, out_h, margin=0.08)
+        roi_w, roi_h = right - left, bottom - top
+        if roi_w < 12 or roi_h < 12:
+            return None
+
+        local = dst_pts.copy()
+        local[:, 0] -= left
+        local[:, 1] -= top
+        try:
+            triangles = ScipyDelaunay(local).simplices
+        except Exception:
+            return None
+
+        map_x = np.zeros((roi_h, roi_w), dtype=np.float32)
+        map_y = np.zeros((roi_h, roi_w), dtype=np.float32)
+        coverage = np.zeros((roi_h, roi_w), dtype=np.uint8)
+
+        for simplex in triangles:
+            src_tri = src_pts[simplex]
+            dst_tri = local[simplex]
+            src_area = ((src_tri[1, 0] - src_tri[0, 0]) * (src_tri[2, 1] - src_tri[0, 1]) -
+                        (src_tri[1, 1] - src_tri[0, 1]) * (src_tri[2, 0] - src_tri[0, 0]))
+            dst_area = ((dst_tri[1, 0] - dst_tri[0, 0]) * (dst_tri[2, 1] - dst_tri[0, 1]) -
+                        (dst_tri[1, 1] - dst_tri[0, 1]) * (dst_tri[2, 0] - dst_tri[0, 0]))
+            if abs(src_area) < 1.0 or abs(dst_area) < 1.0 or src_area * dst_area < 0:
+                continue
+            try:
+                bx, by, bw, bh = cv2.boundingRect(np.ascontiguousarray(dst_tri))
+            except cv2.error:
+                continue
+            x0, y0 = max(0, bx), max(0, by)
+            x1, y1 = min(roi_w, bx + bw), min(roi_h, by + bh)
+            tw, th = x1 - x0, y1 - y0
+            if tw < 2 or th < 2:
+                continue
+            patch_tri = dst_tri - np.float32([[x0, y0], [x0, y0], [x0, y0]])
+            patch = np.zeros((th, tw), dtype=np.uint8)
+            cv2.fillConvexPoly(patch, np.round(patch_tri).astype(np.int32), 255)
+            ys, xs = np.nonzero(patch)
+            if len(xs) == 0:
+                continue
+            try:
+                matrix = cv2.getAffineTransform(patch_tri, src_tri)
+            except cv2.error:
+                continue
+            px = xs.astype(np.float32)
+            py = ys.astype(np.float32)
+            coverage[y0 + ys, x0 + xs] = 255
+            map_x[y0 + ys, x0 + xs] = matrix[0, 0] * px + matrix[0, 1] * py + matrix[0, 2]
+            map_y[y0 + ys, x0 + xs] = matrix[1, 0] * px + matrix[1, 1] * py + matrix[1, 2]
+
+        if int(np.count_nonzero(coverage)) < 40:
+            return None
+
+        sampled = cv2.remap(
+            sample, map_x, map_y, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT_101,
+        )
+        out = np.array(canvas, copy=True)
+        roi = out[top:bottom, left:right]
+        taken = coverage > 0
+        roi[taken] = sampled[taken]
+        out[top:bottom, left:right] = roi
+
+        full = np.zeros(canvas.shape[:2], dtype=np.uint8)
+        full[top:bottom, left:right] = coverage
+        return out, full
+
+    def _warp_shape_roi(self, source_img, source_points, target_img, target_points):
+        from scipy.spatial import Delaunay as ScipyDelaunay
+
+        height, width = target_img.shape[:2]
+        source_points = np.asarray(source_points, dtype=np.float32)
+        target_points = np.asarray(target_points, dtype=np.float32)
+        left, top, right, bottom = _face_roi(target_points, width, height)
+        roi_w, roi_h = right - left, bottom - top
+        if roi_w < 12 or roi_h < 12:
+            return None
+
+        dst = target_points.copy()
+        dst[:, 0] -= left
+        dst[:, 1] -= top
+
+        all_src = np.vstack([source_points, _shape_anchors(source_points)])
+        all_dst = np.vstack([dst, _shape_anchors(dst)])
+        try:
+            triangles = ScipyDelaunay(all_dst).simplices
+        except Exception:
+            return None
+
+        warped_sum = np.zeros((roi_h, roi_w, 3), dtype=np.float32)
+        weight_sum = np.zeros((roi_h, roi_w), dtype=np.float32)
+
+        for simplex in triangles:
+            src_tri = all_src[simplex]
+            dst_tri = all_dst[simplex]
+            src_area = ((src_tri[1][0] - src_tri[0][0]) * (src_tri[2][1] - src_tri[0][1]) -
+                        (src_tri[1][1] - src_tri[0][1]) * (src_tri[2][0] - src_tri[0][0]))
+            dst_area = ((dst_tri[1][0] - dst_tri[0][0]) * (dst_tri[2][1] - dst_tri[0][1]) -
+                        (dst_tri[1][1] - dst_tri[0][1]) * (dst_tri[2][0] - dst_tri[0][0]))
+            if abs(src_area) < 1.0 or abs(dst_area) < 1.0:
+                continue
+
+            try:
+                bx, by, bw, bh = cv2.boundingRect(np.ascontiguousarray(dst_tri))
+            except cv2.error:
+                continue
+            x, y = max(0, bx), max(0, by)
+            x1, y1 = min(roi_w, bx + bw), min(roi_h, by + bh)
+            tw, th = x1 - x, y1 - y
+            if tw < 2 or th < 2:
+                continue
+
+            dst_offset = dst_tri - np.float32([[x, y], [x, y], [x, y]])
+            mask = np.zeros((th, tw), dtype=np.uint8)
+            cv2.fillConvexPoly(mask, np.round(dst_offset).astype(np.int32), 255,
+                               lineType=cv2.LINE_AA)
+            try:
+                patch = cv2.warpAffine(
+                    source_img, cv2.getAffineTransform(src_tri, dst_offset), (tw, th),
+                    flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT_101,
+                )
+            except cv2.error:
+                continue
+            weight = mask.astype(np.float32) / 255.0
+            warped_sum[y:y + th, x:x + tw] += patch.astype(np.float32) * weight[:, :, None]
+            weight_sum[y:y + th, x:x + tw] += weight
+
+        if int(np.count_nonzero(weight_sum > 1e-5)) < 20:
+            return None
+
+        result = target_img.copy()
+        roi = result[top:bottom, left:right].astype(np.float32)
+        valid = weight_sum > 1e-5
+        warped_sum[valid] /= weight_sum[valid, None]
+        coverage = np.clip(weight_sum, 0.0, 1.0)
+        roi[valid] = (warped_sum[valid] * coverage[valid, None] +
+                      roi[valid] * (1.0 - coverage[valid, None]))
+        result[top:bottom, left:right] = np.clip(roi, 0, 255).astype(np.uint8)
+        return result
+
+    def _warp_face(self, source_img, source_landmarks, target_img, target_landmarks, fast=False):
         h, w = target_img.shape[:2]
 
         source_points = source_landmarks.astype(np.float32)
         target_points = target_landmarks.astype(np.float32)
 
         M = self._compute_eye_similarity(source_points, target_points)
+        if fast:
+            warped = None
+            try:
+                warped = self._warp_shape_roi(
+                    source_img, source_points, target_img, target_points
+                )
+            except Exception:
+                warped = None
+            if warped is None:
+                warped = cv2.warpAffine(
+                    source_img, M, (w, h),
+                    flags=cv2.INTER_LINEAR,
+                    borderMode=cv2.BORDER_REFLECT_101,
+                )
+            return warped, M, target_points
+
+        from scipy.spatial import Delaunay as ScipyDelaunay
 
         def _bbox_anchors(pts, expand=0.15):
             x0, y0 = pts[:, 0].min(), pts[:, 1].min()
@@ -318,7 +846,7 @@ class FaceSwapper:
         face_contour.append(cheek_right + (brow_right_outer - cheek_right) * 0.15)
         inner_cheek_right = points[14] + (points[15] - points[14]) * 0.3
         face_contour.append(inner_cheek_right)
-        for i in range(9, 16, -1):
+        for i in range(15, 8, -1):
             face_contour.append(adjusted_jaw[i])
         face_contour.append(adjusted_jaw[16])
 
@@ -802,3 +1330,213 @@ class FaceSwapper:
         output = target_img.copy()
         output[y0:y1, x0:x1] = np.clip(result, 0, 255).astype(np.uint8)
         return output
+
+
+class FaceSequence:
+    HOLD_FRAMES = 4
+
+    def __init__(self, swapper):
+        self.swapper = swapper
+        self.tracks = []
+        self._identity = None
+
+    def _identity_swap(self):
+        if self._identity is None:
+            from src.core.identity_swap import IdentitySwap
+            self._identity = IdentitySwap.from_faces(
+                self.swapper.maduro_faces,
+                self.swapper.maduro_landmarks_list,
+            )
+        return self._identity
+
+    def apply(self, image):
+        image = np.asarray(image)
+        if image.ndim != 3:
+            return image
+        result = np.array(image, copy=True)
+        detections = self._detections(image)
+        used = set()
+        for detection in detections:
+            center = (detection["left"] + detection["right"]) / 2.0
+            iod = detection["iod"]
+            best_i, best_dist = None, 1e9
+            for index, track in enumerate(self.tracks):
+                if index in used:
+                    continue
+                track_center = (track["left"] + track["right"]) / 2.0
+                dist = float(np.linalg.norm(center - track_center))
+                gate = max(iod, track["iod"]) * 1.6
+                if dist < gate and dist < best_dist:
+                    best_i, best_dist = index, dist
+            if best_i is None:
+                self.tracks.append(self._new_track(image, detection))
+                used.add(len(self.tracks) - 1)
+            else:
+                track = self.tracks[best_i]
+                jump = best_dist > max(iod, track["iod"]) * 0.45
+                alpha = 1.0 if jump else 0.65
+                track["left"] = alpha * detection["left"] + (1.0 - alpha) * track["left"]
+                track["right"] = alpha * detection["right"] + (1.0 - alpha) * track["right"]
+                track["mouth"] = alpha * detection["mouth"] + (1.0 - alpha) * track["mouth"]
+                track["kps"] = alpha * detection["kps"] + (1.0 - alpha) * track["kps"]
+                track["box"] = alpha * detection["box"] + (1.0 - alpha) * track["box"]
+                track["iod"] = iod
+                track["profile"] = bool(detection["profile"])
+                track["misses"] = 0
+                track["hits"] += 1
+                used.add(best_i)
+
+        for index, track in enumerate(self.tracks):
+            if index not in used:
+                track["misses"] += 1
+        self.tracks = [track for track in self.tracks if track["misses"] <= self.HOLD_FRAMES]
+        # One face should not get a second copy parked on the chest or hand.
+        kept = []
+        for track in sorted(self.tracks, key=lambda item: -item["iod"]):
+            center = (track["left"] + track["right"]) / 2.0
+            if any(float(np.linalg.norm(center - (other["left"] + other["right"]) / 2.0)) < other["iod"] * 0.85
+                   for other in kept):
+                continue
+            kept.append(track)
+        self.tracks = kept
+
+        identity = self._identity_swap()
+        for track in self.tracks:
+            if track["hits"] >= 1 and track.get("kps") is not None:
+                result = identity.apply(result, track["kps"], track.get("box"))
+        return result
+
+    def _detections(self, image):
+        found = self.swapper.detector._yunet_rows(image)
+        if found is None:
+            return []
+        height, width = image.shape[:2]
+        detections = []
+        for row in found:
+            if len(row) < 14:
+                continue
+            points = row[4:14].reshape(5, 2).astype(np.float64)
+            order = np.argsort(points[:2, 0])
+            left = points[order[0]]
+            right = points[order[1]]
+            iod = float(np.linalg.norm(right - left))
+            if iod < 3.0:
+                continue
+            if left[0] < 2 or right[0] > width - 3 or min(left[1], right[1]) < 2:
+                continue
+            if max(left[1], right[1]) > height - 3:
+                continue
+            mouth = points[3:5].mean(axis=0)
+            box = row[:4].astype(np.float64)
+            span = float(right[0] - left[0])
+            nose_t = float((points[2, 0] - left[0]) / span) if span > 1 else 0.5
+            detections.append({
+                "left": left,
+                "right": right,
+                "mouth": mouth,
+                "kps": points.copy(),
+                "box": box.copy(),
+                "iod": max(iod, 8.0),
+                "profile": nose_t < 0.22 or nose_t > 0.78,
+            })
+        return detections
+
+    def _new_track(self, image, detection):
+        source_idx = 0
+        try:
+            iod = detection["iod"]
+            left = detection["left"]
+            right = detection["right"]
+            mouth = detection["mouth"]
+            rect_left = int(max(0, min(left[0], right[0]) - iod * 0.6))
+            rect_right = int(min(image.shape[1] - 1, max(left[0], right[0]) + iod * 0.6))
+            rect_top = int(max(0, min(left[1], right[1]) - iod))
+            rect_bottom = int(min(image.shape[0] - 1, mouth[1] + iod))
+            if rect_right > rect_left + 4 and rect_bottom > rect_top + 4:
+                import dlib
+                rect = dlib.rectangle(rect_left, rect_top, rect_right, rect_bottom)
+                landmarks = self.swapper.detector.get_landmarks(image, rect)
+                source_idx = self.swapper._select_best_source(landmarks)
+        except Exception:
+            source_idx = 0
+        return {
+            "left": detection["left"].copy(),
+            "right": detection["right"].copy(),
+            "mouth": detection["mouth"].copy(),
+            "iod": detection["iod"],
+            "misses": 0,
+            "hits": 1,
+            "source": int(source_idx),
+            "profile": bool(detection["profile"]),
+            "kps": detection["kps"].copy(),
+            "box": detection["box"].copy(),
+        }
+
+    def _fit_landmarks(self, image, track):
+        import dlib
+        iod = float(track["iod"])
+        left, right, mouth = track["left"], track["right"], track["mouth"]
+        height, width = image.shape[:2]
+        rect_left = int(max(0, min(left[0], right[0]) - iod * 0.55))
+        rect_right = int(min(width - 1, max(left[0], right[0]) + iod * 0.55))
+        rect_top = int(max(0, min(left[1], right[1]) - iod * 0.95))
+        rect_bottom = int(min(height - 1, float(mouth[1]) + iod * 1.1))
+        if rect_right <= rect_left + 8 or rect_bottom <= rect_top + 8:
+            return None
+        landmarks = self.swapper.detector.get_landmarks(
+            image, dlib.rectangle(rect_left, rect_top, rect_right, rect_bottom),
+        ).astype(np.float64)
+        if landmarks.shape[0] < 68:
+            return None
+        eye_center = (landmarks[36:42].mean(axis=0) + landmarks[42:48].mean(axis=0)) / 2.0
+        tracked_center = (left + right) / 2.0
+        if float(np.linalg.norm(eye_center - tracked_center)) > iod * 0.4:
+            return None
+        left_eye = landmarks[36:42].mean(axis=0)
+        if not (left_eye[1] < landmarks[30, 1] < landmarks[51, 1] < landmarks[8, 1]):
+            return None
+        height, width = image.shape[:2]
+        if landmarks[:, 0].min() < 2 or landmarks[:, 1].min() < 2:
+            return None
+        if landmarks[:, 0].max() > width - 3 or landmarks[:, 1].max() > height - 3:
+            return None
+        return landmarks
+
+    def _reshape(self, result, image, track):
+        if track.get("profile"):
+            return
+        fresh = self._fit_landmarks(image, track)
+        eye_center = (track["left"] + track["right"]) / 2.0
+        if fresh is not None:
+            track["landmarks"] = fresh
+            track["eye_anchor"] = eye_center.copy()
+            landmarks = fresh
+        elif track.get("landmarks") is not None and track.get("eye_anchor") is not None:
+            shift = eye_center - track["eye_anchor"]
+            if float(np.linalg.norm(shift)) > float(track["iod"]) * 0.7:
+                return
+            landmarks = track["landmarks"] + shift
+            track["landmarks"] = landmarks
+            track["eye_anchor"] = eye_center.copy()
+        else:
+            return
+
+        source_lm = self.swapper.maduro_landmarks_list[track["source"]]
+        dest = self.swapper._compose_shape(landmarks, source_lm, strength=1.0)
+        edited = self.swapper._remap_mesh(
+            image, landmarks, dest, canvas=image, lock_ring=True,
+        )
+        if edited is None:
+            return
+        warped, coverage = edited
+        if int(np.count_nonzero(coverage)) < 40:
+            return
+        hull = cv2.convexHull(np.round(np.vstack([
+            dest[0:17], dest[17:27], self.swapper._forehead_points(dest),
+        ])).astype(np.int32))
+        face = np.zeros(result.shape[:2], dtype=np.uint8)
+        cv2.fillConvexPoly(face, hull, 255)
+        use = (coverage > 0) & (face > 0)
+        if int(np.count_nonzero(use)) < 40:
+            return
+        result[use] = warped[use]
