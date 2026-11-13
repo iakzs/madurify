@@ -460,6 +460,99 @@ class _FfmpegPipeWriter:
             raise RuntimeError(detail.strip() or 'Video encoder failed')
 
 
+def _probe_stream_size(path):
+    ffprobe = shutil.which('ffprobe')
+    if ffprobe is None:
+        return None
+    try:
+        result = subprocess.run(
+            [ffprobe, '-v', 'error', '-select_streams', 'v:0',
+             '-show_entries', 'stream=width,height',
+             '-of', 'csv=p=0:s=x', str(path)],
+            capture_output=True, timeout=30,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    text = result.stdout.decode('utf-8', 'replace').strip().splitlines()
+    if result.returncode != 0 or not text or 'x' not in text[0]:
+        return None
+    width_text, height_text = text[0].split('x', 1)
+    try:
+        width, height = int(width_text), int(height_text)
+    except ValueError:
+        return None
+    if width <= 0 or height <= 0:
+        return None
+    return width, height
+
+
+class _FfmpegFrameReader:
+    def __init__(self, path):
+        self.path = path
+        self.proc = None
+        self.width = 0
+        self.height = 0
+        self._frame_bytes = 0
+        self._retried = False
+        ffmpeg = shutil.which('ffmpeg')
+        size = _probe_stream_size(path)
+        if ffmpeg is None or size is None:
+            return
+        self.width, self.height = size
+        self._frame_bytes = self.width * self.height * 3
+        self._spawn(noautorotate=True)
+
+    def _spawn(self, noautorotate):
+        ffmpeg = shutil.which('ffmpeg')
+        if ffmpeg is None:
+            return
+        command = [ffmpeg, '-v', 'error']
+        if noautorotate:
+            command.append('-noautorotate')
+        command += [
+            '-i', str(self.path), '-map', '0:v:0',
+            '-f', 'rawvideo', '-pix_fmt', 'bgr24', 'pipe:1',
+        ]
+        try:
+            self.proc = subprocess.Popen(
+                command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            )
+        except OSError:
+            self.proc = None
+
+    def read(self):
+        ok, frame = self._read_one()
+        if ok or self._retried:
+            return ok, frame
+        self._retried = True
+        self.release()
+        self._spawn(noautorotate=False)
+        return self._read_one()
+
+    def _read_one(self):
+        if self.proc is None or self._frame_bytes <= 0 or self.proc.stdout is None:
+            return False, None
+        raw = self.proc.stdout.read(self._frame_bytes)
+        if len(raw) != self._frame_bytes:
+            return False, None
+        frame = np.frombuffer(raw, dtype=np.uint8).reshape((self.height, self.width, 3))
+        return True, frame.copy()
+
+    def release(self):
+        proc = self.proc
+        self.proc = None
+        if proc is None:
+            return
+        if proc.stdout is not None and not proc.stdout.closed:
+            proc.stdout.close()
+        if proc.poll() is None:
+            proc.kill()
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            pass
+
+
 def _fallback_rgb(frame_bgr, width, height):
     try:
         rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
@@ -563,9 +656,17 @@ def process_video(swapper, input_path, output_path, scale=0.6, detect_every=1,
 
     try:
         try:
+            ffmpeg_reader = None
             with ThreadPoolExecutor(max_workers=workers) as executor:
                 while True:
-                    ok, frame_bgr = cap.read()
+                    if ffmpeg_reader is not None:
+                        ok, frame_bgr = ffmpeg_reader.read()
+                    else:
+                        ok, frame_bgr = cap.read()
+                        if not ok and frame_idx == 0 and not pending:
+                            cap.release()
+                            ffmpeg_reader = _FfmpegFrameReader(input_path)
+                            ok, frame_bgr = ffmpeg_reader.read()
                     if not ok:
                         break
                     frame_rgb = _fallback_rgb(
@@ -582,9 +683,13 @@ def process_video(swapper, input_path, output_path, scale=0.6, detect_every=1,
                 while pending:
                     write_next()
             if frame_idx == 0:
-                raise ValueError("Video contains no readable frames")
+                raise ValueError(
+                    "This video couldn't be read. Export it as a regular MP4 and try again."
+                )
         finally:
             cap.release()
+            if ffmpeg_reader is not None:
+                ffmpeg_reader.release()
             if cv_writer is not None:
                 cv_writer.release()
 
