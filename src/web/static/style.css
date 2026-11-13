@@ -109,6 +109,11 @@ header h1 {
     color: var(--text-secondary);
 }
 
+.upload-section > .upload-hint {
+    text-align: center;
+    margin-top: 0.75rem;
+}
+
 .quality-picker {
     display: flex;
     justify-content: center;

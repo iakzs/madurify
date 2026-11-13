@@ -59,130 +59,15 @@ class FaceSwapper:
             raise ValueError("No valid faces found in Maduro face images")
 
     def swap_face(self, target_image, debug_path=None, fast=False, faces_override=None):
-        target_image = np.array(target_image) if not isinstance(target_image, np.ndarray) else target_image
-
-        if faces_override is not None:
-            faces = faces_override
-        else:
-            faces = self.detector.detect_faces(target_image)
-            if len(faces) == 0:
-                raise ValueError("No face detected in target image")
-            faces = sorted(faces, key=lambda f: (f.right() - f.left()) * (f.bottom() - f.top()), reverse=True)
-
-        if len(faces) == 0:
+        image = np.asarray(target_image)
+        if image.ndim == 2:
+            image = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
+        elif image.ndim == 3 and image.shape[2] == 4:
+            image = cv2.cvtColor(image, cv2.COLOR_RGBA2RGB)
+        sequence = FaceSequence(self)
+        result = sequence.apply(image)
+        if not sequence.tracks:
             raise ValueError("No face detected in target image")
-
-        result = target_image.copy()
-        processed_regions = []
-        swapped_any = False
-        saw_face = False
-        last_error = None
-
-        for face_idx, face_item in enumerate(faces):
-            try:
-                if faces_override is not None:
-                    face_rect, target_landmarks = face_item
-                    target_landmarks = np.asarray(target_landmarks, dtype=np.float64)
-                else:
-                    face_rect = face_item
-                    target_landmarks = self.detector.get_landmarks(target_image, face_rect)
-
-                best_source_idx = self._select_best_source(target_landmarks)
-                source_img = self.maduro_faces[best_source_idx]
-                source_landmarks = self.maduro_landmarks_list[best_source_idx]
-
-                if self.debug and debug_path:
-                    debug_dir = Path(debug_path).parent
-                    save_image(source_img, str(debug_dir / f"debug_{face_idx+1:02d}a_source.jpg"))
-                    save_image(target_image, str(debug_dir / f"debug_{face_idx+1:02d}b_target.jpg"))
-
-                dest_lm = np.asarray(target_landmarks, dtype=np.float64)
-                shaped_ok = False
-                if dest_lm.shape[0] >= 68 and np.asarray(source_landmarks).shape[0] >= 68:
-                    strength = self._shape_strength(target_landmarks, target_image.shape)
-                    if strength <= 0 or not self.detector.landmarks_match(
-                        target_image, target_landmarks,
-                    ):
-                        saw_face = True
-                        continue
-                    try:
-                        shaped_ok = self._apply_identity(
-                            result, target_image, target_landmarks,
-                            source_img, source_landmarks, strength,
-                        )
-                    except Exception as shape_error:
-                        last_error = shape_error
-                        shaped_ok = False
-                    if not shaped_ok:
-                        saw_face = True
-                        continue
-
-                if shaped_ok:
-                    swapped_any = True
-                    if self.debug and debug_path:
-                        debug_dir = Path(debug_path).parent
-                        save_image(result, str(debug_dir / f"debug_{face_idx+1:02d}f_result.jpg"))
-                    continue
-
-                warped_face, _M, transformed_landmarks = self._warp_face(
-                    source_img, source_landmarks, target_image, target_landmarks, fast=fast
-                )
-                warped_face = np.clip(warped_face, 0, 255).astype(np.uint8)
-
-                if self.debug and debug_path:
-                    debug_dir = Path(debug_path).parent
-                    save_image(warped_face, str(debug_dir / f"debug_{face_idx+1:02d}c_warped.jpg"))
-
-                face_center = np.mean(transformed_landmarks, axis=0)
-                mask = self._create_face_mask(
-                    transformed_landmarks, target_image.shape[:2], None if fast else target_image,
-                )
-
-                if self.debug and debug_path:
-                    debug_dir = Path(debug_path).parent
-                    mask_vis = mask.copy()
-                    save_image(cv2.merge([mask_vis, mask_vis, mask_vis]),
-                               str(debug_dir / f"debug_{face_idx+1:02d}d_mask.jpg"))
-
-                warped_face = self._correct_colors(
-                    target_image, warped_face, mask, transformed_landmarks
-                )
-                warped_face = np.clip(warped_face, 0, 255).astype(np.uint8)
-
-                if self.debug and debug_path:
-                    debug_dir = Path(debug_path).parent
-                    save_image(warped_face, str(debug_dir / f"debug_{face_idx+1:02d}e_color.jpg"))
-
-                face_radius = max(
-                    np.linalg.norm(face_center - transformed_landmarks[0]),
-                    np.linalg.norm(face_center - transformed_landmarks[16])
-                )
-                processed_regions.append((face_center, face_radius))
-
-                result = self._blend_face(result, warped_face, mask, transformed_landmarks,
-                                          target_image, debug_path, face_idx, fast=fast)
-                result = np.clip(result, 0, 255).astype(np.uint8)
-                swapped_any = True
-
-                if self.debug and debug_path:
-                    debug_dir = Path(debug_path).parent
-                    save_image(result, str(debug_dir / f"debug_{face_idx+1:02d}f_result.jpg"))
-
-            except Exception as e:
-                last_error = e
-                if self.debug:
-                    print(f"Warning: face {face_idx} failed: {e}")
-                continue
-
-        if not swapped_any:
-            if saw_face:
-                return result
-            if isinstance(last_error, ValueError):
-                raise last_error
-            if last_error is None:
-                raise ValueError("Could not swap detected face")
-            raise ValueError(f"Could not swap detected face: {last_error}") from last_error
-
         return result
 
     def _select_best_source(self, target_landmarks):
@@ -1341,13 +1226,16 @@ class FaceSequence:
         self._identity = None
 
     def _identity_swap(self):
-        if self._identity is None:
+        cached = getattr(self.swapper, "_identity_model", None)
+        if cached is None:
             from src.core.identity_swap import IdentitySwap
-            self._identity = IdentitySwap.from_faces(
+            cached = IdentitySwap.from_faces(
                 self.swapper.maduro_faces,
                 self.swapper.maduro_landmarks_list,
             )
-        return self._identity
+            self.swapper._identity_model = cached
+        self._identity = cached
+        return cached
 
     def apply(self, image):
         image = np.asarray(image)

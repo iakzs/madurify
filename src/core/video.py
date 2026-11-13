@@ -572,10 +572,7 @@ def process_video(swapper, input_path, output_path, scale=0.6, detect_every=1,
                         _rotate_frame(frame_bgr, rotation) if rotation else frame_bgr,
                         width, height,
                     )
-                    try:
-                        painted = sequence.apply(frame_rgb)
-                    except Exception:
-                        painted = frame_rgb
+                    painted = sequence.apply(frame_rgb)
                     future = Future()
                     future.set_result(painted)
                     pending.append((future, frame_rgb))
